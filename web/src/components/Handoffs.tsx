@@ -49,9 +49,16 @@ export function Handoffs({
         setSignKey(null);
         setSuppKey(null);
       }
+      const conflicts = err instanceof ApiError ? err.body.conflicts : undefined;
       const msg =
         err instanceof ApiError
-          ? `${err.message}（${err.body.code}）`
+          ? `${err.message}（${err.body.code}）` +
+            (conflicts?.length
+              ? '：' +
+                conflicts
+                  .map((c) => `${c.field} 当前「${String(c.current)}」`)
+                  .join('，')
+              : '')
           : '操作失败';
       setError(msg);
       announce(`操作失败：${msg}`);
@@ -100,7 +107,7 @@ export function Handoffs({
       if (!detail) return;
       const res = await api.post<{ alreadyConfirmed: boolean }>(
         `/api/handoffs/${detail.handoff.id}/items/${itemId}/confirm`,
-        { confirmedBy },
+        { confirmedBy, expectedVersion: detail.handoff.version },
         crypto.randomUUID(),
       );
       announce(

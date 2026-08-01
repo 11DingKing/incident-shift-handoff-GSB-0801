@@ -25,6 +25,7 @@ interface SignBody {
 
 interface ConfirmBody {
   confirmedBy?: string;
+  expectedVersion?: number;
 }
 
 interface SupplementBody {
@@ -304,6 +305,24 @@ export function handoffRoutes(app: FastifyInstance, pool: Pool): void {
       );
       const item = hi.rows[0];
       if (!item) throw ApiError.notFound('交接快照项', itemId);
+      // 携带旧版本（如签收前的草稿版本）→ 409，返回字段级当前值
+      if (body.expectedVersion !== undefined) {
+        if (typeof body.expectedVersion !== 'number') {
+          throw ApiError.badRequest('expectedVersion 必须是数字');
+        }
+        if (handoff.version !== body.expectedVersion) {
+          throw ApiError.versionConflict('交接包', handoff.version, [
+            {
+              field: 'handoffVersion',
+              current: handoff.version,
+              attempted: body.expectedVersion,
+            },
+            { field: 'confirmed', current: item.confirmed, attempted: true },
+            { field: 'confirmedBy', current: item.confirmed_by, attempted: confirmedBy },
+            { field: 'confirmedAt', current: item.confirmed_at, attempted: null },
+          ]);
+        }
+      }
       if (item.confirmed) {
         // 幂等：不覆盖首次确认人与确认时间
         return { item, alreadyConfirmed: true };

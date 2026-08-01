@@ -229,3 +229,138 @@ test('并发签收补充包：一成一败，一组快照一条审计', async ()
   );
   assert.equal(audits.rowCount, 1);
 });
+
+test('确认携带签收前旧版本：409 字段级冲突且不写入确认', async () => {
+  const parentId = await createHandoff(ctx.app);
+  await signHandoff(ctx.app, parentId);
+  const guardBefore = (
+    await ctx.app.inject({ method: 'GET', url: `/api/incidents/${INCIDENT}` })
+  )
+    .json()
+    .actionItems.find((i: { id: string }) => i.id === ITEM_GUARD);
+  await ctx.app.inject({
+    method: 'PATCH',
+    url: `/api/action-items/${ITEM_GUARD}`,
+    payload: { status: 'in_progress', expectedVersion: guardBefore.version },
+  });
+  const child = await createChild(parentId);
+  await signHandoff(ctx.app, child.id!); // 签收后 version = 2
+
+  // 客户端拿着签收前的草稿版本（v1）确认 → 409，附字段级当前值
+  const stale = await ctx.app.inject({
+    method: 'POST',
+    url: `/api/handoffs/${child.id}/items/${ITEM_GUARD}/confirm`,
+    payload: { confirmedBy: '接班人甲', expectedVersion: 1 },
+  });
+  assert.equal(stale.statusCode, 409);
+  const err = stale.json().error;
+  assert.equal(err.code, 'VERSION_CONFLICT');
+  assert.equal(err.currentVersion, 2);
+  const byField = new Map(
+    err.conflicts.map((c: { field: string }) => [c.field, c]),
+  );
+  assert.deepEqual(byField.get('handoffVersion'), {
+    field: 'handoffVersion',
+    current: 2,
+    attempted: 1,
+  });
+  assert.deepEqual(byField.get('confirmed'), {
+    field: 'confirmed',
+    current: false,
+    attempted: true,
+  });
+  assert.deepEqual(byField.get('confirmedBy'), {
+    field: 'confirmedBy',
+    current: null,
+    attempted: '接班人甲',
+  });
+  // 未写入任何确认
+  const row = await ctx.pool.query(
+    'SELECT confirmed FROM handoff_items WHERE handoff_id = $1 AND action_item_id = $2',
+    [child.id, ITEM_GUARD],
+  );
+  assert.equal(row.rows[0].confirmed, false);
+});
+
+test('确认并发 + 同键断线重试：仅首次有效确认成功，不自动关闭行动项', async () => {
+  const parentId = await createHandoff(ctx.app);
+  await signHandoff(ctx.app, parentId);
+  const guardV = (
+    await ctx.app.inject({ method: 'GET', url: `/api/incidents/${INCIDENT}` })
+  )
+    .json()
+    .actionItems.find((i: { id: string }) => i.id === ITEM_GUARD).version;
+  await ctx.app.inject({
+    method: 'PATCH',
+    url: `/api/action-items/${ITEM_GUARD}`,
+    payload: { status: 'in_progress', expectedVersion: guardV },
+  });
+  const child = await createChild(parentId);
+  await signHandoff(ctx.app, child.id!);
+  const url = `/api/handoffs/${child.id}/items/${ITEM_GUARD}/confirm`;
+
+  // 两个客户端同时确认（都带当前版本 v2）
+  const [a, b] = await Promise.all([
+    ctx.app.inject({
+      method: 'POST',
+      url,
+      payload: { confirmedBy: '接班人甲', expectedVersion: 2 },
+    }),
+    ctx.app.inject({
+      method: 'POST',
+      url,
+      payload: { confirmedBy: '接班人乙', expectedVersion: 2 },
+    }),
+  ]);
+  assert.equal(a.statusCode, 200);
+  assert.equal(b.statusCode, 200);
+  const winners = [a, b].filter((r) => r.json().alreadyConfirmed === false);
+  assert.equal(winners.length, 1); // 只有首次有效确认
+
+  // 断线后用相同幂等键重试同一确认 → 重放首次响应，不产生第二份确认或审计
+  const key = { 'idempotency-key': 'guard-confirm-retry' };
+  const first = await ctx.app.inject({
+    method: 'POST',
+    url,
+    headers: key,
+    payload: { confirmedBy: '接班人丙', expectedVersion: 2 },
+  });
+  const retry = await ctx.app.inject({
+    method: 'POST',
+    url,
+    headers: key,
+    payload: { confirmedBy: '接班人丙', expectedVersion: 2 },
+  });
+  assert.equal(first.statusCode, 200);
+  assert.equal(retry.statusCode, 200);
+  assert.equal(retry.json().item.confirmed_at, first.json().item.confirmed_at);
+
+  // 审计：整项确认只产生一条，无重复
+  const audits = await ctx.pool.query(
+    `SELECT * FROM timeline_events WHERE handoff_id = $1 AND title = '行动项已确认'`,
+    [child.id],
+  );
+  assert.equal(audits.rowCount, 1);
+
+  // 行动项状态不被确认改动（未确认项更不自动关闭）
+  const inc = await ctx.app.inject({ method: 'GET', url: `/api/incidents/${INCIDENT}` });
+  const guard = inc
+    .json()
+    .actionItems.find((i: { id: string }) => i.id === ITEM_GUARD);
+  assert.notEqual(guard.status, 'closed');
+  assert.equal(guard.status, 'in_progress');
+  const scaffold = inc
+    .json()
+    .actionItems.find((i: { id: string }) => i.id === ITEM_SCAFFOLD);
+  assert.equal(scaffold.status, 'open');
+
+  // 父包确认记录不受影响
+  const parentItems = await ctx.pool.query(
+    'SELECT confirmed, confirmed_by FROM handoff_items WHERE handoff_id = $1',
+    [parentId],
+  );
+  for (const r of parentItems.rows) {
+    assert.equal(r.confirmed, false);
+    assert.equal(r.confirmed_by, null);
+  }
+});

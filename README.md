@@ -95,7 +95,7 @@ npm run dev            # 开发启动（:5173，/api 代理到 :3001）
 | GET | `/api/handoffs/:id` | 详情：草稿显示实时项；已签收显示锁定快照 + 补充事件；补充包附带 `parent` 与 `comparison`（added / changed[逐字段 diff] / unchanged / parentItems） |
 | PATCH | `/api/handoffs/:id` | 仅草稿可改；已签收 409 `HANDOFF_LOCKED` |
 | POST | `/api/handoffs/:id/sign` | 签收：快照 + 状态 + 审计同事务原子产生 |
-| POST | `/api/handoffs/:id/items/:itemId/confirm` | 逐项确认（幂等） |
+| POST | `/api/handoffs/:id/items/:itemId/confirm` | 逐项确认（幂等；可选 `expectedVersion`，旧版本 409 含字段级当前值） |
 | POST | `/api/handoffs/:id/supplements` | 追加补充事件（须已签收，自动关联） |
 
 所有非 GET 请求支持 `Idempotency-Key` 头：断线重试/双击/并发同键均只生效一次；
