@@ -21,8 +21,9 @@ export function ensureSchema(): void {
 /** Truncate all data and re-insert the canonical initial incident. */
 export async function resetData(): Promise<void> {
   await pool.query(`
-    TRUNCATE idempotency_keys, audit_events, supplemental_events, acknowledgements,
-             handoffs, timeline_events, action_items, incidents RESTART IDENTITY CASCADE;
+    TRUNCATE idempotency_keys, audit_events, supplemental_handoffs, supplemental_events,
+             acknowledgements, handoffs, timeline_events, action_items, incidents
+             RESTART IDENTITY CASCADE;
   `);
 
   await pool.query(

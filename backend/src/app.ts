@@ -70,6 +70,7 @@ export function buildApp(): FastifyInstance {
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
     const event = await svc.addTimelineEvent(id, {
+      id: body.id as string | undefined,
       kind: requireString(body, 'kind'),
       description: requireString(body, 'description'),
       responsible_party: requireString(body, 'responsible_party'),
@@ -79,6 +80,23 @@ export function buildApp(): FastifyInstance {
     });
     reply.code(201);
     return event;
+  });
+
+  // Create a new action item (e.g. a post-sign-off follow-up).
+  app.post('/api/incidents/:id/action-items', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const item = await svc.createActionItem(id, {
+      id: body.id as string | undefined,
+      title: requireString(body, 'title'),
+      detail: body.detail as string | undefined,
+      status: body.status as svc.CreateActionItemInput['status'],
+      responsible_party: requireString(body, 'responsible_party'),
+      occurred_at: requireString(body, 'occurred_at'),
+      actor: requireString(body, 'actor'),
+    });
+    reply.code(201);
+    return item;
   });
 
   // Optimistic-locked action item update.
@@ -112,11 +130,12 @@ export function buildApp(): FastifyInstance {
   app.get('/api/handoffs/:handoffId', async (req) => {
     const { handoffId } = req.params as { handoffId: string };
     const handoff = await svc.getHandoff(handoffId);
-    const [acknowledgements, supplemental_events] = await Promise.all([
+    const [acknowledgements, supplemental_events, supplemental_handoff] = await Promise.all([
       svc.listAcknowledgements(handoffId),
       svc.listSupplementalEvents(handoffId),
+      svc.getSupplementalHandoffByParent(handoffId),
     ]);
-    return { ...handoff, acknowledgements, supplemental_events };
+    return { ...handoff, acknowledgements, supplemental_events, supplemental_handoff };
   });
 
   // Sign off a handoff (atomic snapshot + audit); idempotent via header/body key.
@@ -173,6 +192,25 @@ export function buildApp(): FastifyInstance {
     });
     reply.code(201);
     return event;
+  });
+
+  // Create a supplemental handoff *package* (structured field-level diff vs the
+  // parent's frozen snapshot). Idempotent; one package per parent handoff.
+  app.post('/api/incidents/:id/handoffs/:handoffId/supplemental-handoff', async (req, reply) => {
+    const { id, handoffId } = req.params as { id: string; handoffId: string };
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const idempotencyKey =
+      (req.headers['idempotency-key'] as string | undefined) ??
+      (body.idempotency_key as string | undefined);
+    const { supplemental, duplicate } = await svc.createSupplementalHandoff(id, handoffId, {
+      from_shift: requireString(body, 'from_shift'),
+      to_shift: requireString(body, 'to_shift'),
+      summary: body.summary as string | undefined,
+      created_by: requireString(body, 'created_by'),
+      idempotencyKey,
+    });
+    reply.code(duplicate ? 200 : 201);
+    return { ...supplemental, duplicate };
   });
 
   return app;

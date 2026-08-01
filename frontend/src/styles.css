@@ -219,6 +219,68 @@ h2 {
   padding-top: 0.75rem;
 }
 
+.supplemental-package {
+  margin-top: 0.75rem;
+  border-top: 1px dashed #e5e7eb;
+  padding-top: 0.75rem;
+}
+
+.supp-pkg-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.supp-pkg-form label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.9rem;
+}
+
+.supp-pkg-form .wide {
+  grid-column: 1 / -1;
+}
+
+.supp-pkg-form button {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.side-by-side {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.side-by-side .pane {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  background: #fafafa;
+}
+
+.side-by-side .diff-pane {
+  background: #fffdf5;
+  border-color: #f5d78f;
+}
+
+.side-by-side h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.side-by-side code {
+  font-size: 0.8rem;
+  color: #6b21a8;
+}
+
+@media (max-width: 640px) {
+  .side-by-side,
+  .supp-pkg-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 .supplemental form {
   display: flex;
   gap: 0.5rem;

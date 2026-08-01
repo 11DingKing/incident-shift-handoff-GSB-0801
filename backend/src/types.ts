@@ -82,6 +82,45 @@ export interface SupplementalEvent {
   created_at: string;
 }
 
+/** A single field that changed between the parent snapshot and current state. */
+export interface FieldChange {
+  field: string;
+  from: unknown;
+  to: unknown;
+}
+
+/** An item (action item / timeline event) that changed since the parent snapshot. */
+export interface ChangedEntity {
+  id: string;
+  changes: FieldChange[];
+}
+
+/**
+ * Structured diff a supplemental package captures: only what was added or
+ * changed relative to the parent handoff's frozen snapshot.
+ */
+export interface HandoffDiff {
+  parent_handoff_id: string;
+  parent_captured_at: string;
+  computed_at: string;
+  added_action_items: ActionItem[];
+  added_timeline_events: TimelineEvent[];
+  changed_action_items: ChangedEntity[];
+  changed_timeline_events: ChangedEntity[];
+}
+
+export interface SupplementalHandoff {
+  id: string;
+  incident_id: string;
+  parent_handoff_id: string;
+  from_shift: string;
+  to_shift: string;
+  summary: string;
+  diff: HandoffDiff;
+  created_by: string;
+  created_at: string;
+}
+
 /** Field-level optimistic-lock conflict body returned with HTTP 409. */
 export interface ConflictBody {
   error: 'version_conflict';

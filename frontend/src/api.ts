@@ -5,6 +5,8 @@ import type {
   Handoff,
   IncidentBundle,
   SupplementalEvent,
+  SupplementalHandoff,
+  TimelineEvent,
 } from './types';
 
 /** Error carrying the parsed body so callers can branch on version_conflict. */
@@ -89,5 +91,44 @@ export const api = {
       'POST',
       `/api/incidents/${incidentId}/handoffs/${handoffId}/supplemental`,
       payload,
+    ),
+
+  addTimelineEvent: (
+    incidentId: string,
+    payload: {
+      id?: string;
+      kind: string;
+      description: string;
+      responsible_party: string;
+      evidence_uri?: string | null;
+      occurred_at: string;
+      actor: string;
+    },
+  ) => request<TimelineEvent>('POST', `/api/incidents/${incidentId}/timeline`, payload),
+
+  createActionItem: (
+    incidentId: string,
+    payload: {
+      id?: string;
+      title: string;
+      detail?: string;
+      status?: string;
+      responsible_party: string;
+      occurred_at: string;
+      actor: string;
+    },
+  ) => request<ActionItem>('POST', `/api/incidents/${incidentId}/action-items`, payload),
+
+  createSupplementalHandoff: (
+    incidentId: string,
+    parentHandoffId: string,
+    payload: { from_shift: string; to_shift: string; summary?: string; created_by: string },
+    idempotencyKey: string,
+  ) =>
+    request<SupplementalHandoff & { duplicate: boolean }>(
+      'POST',
+      `/api/incidents/${incidentId}/handoffs/${parentHandoffId}/supplemental-handoff`,
+      payload,
+      { 'idempotency-key': idempotencyKey },
     ),
 };

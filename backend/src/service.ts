@@ -6,11 +6,15 @@ import type {
   ActionItem,
   ActionItemStatus,
   Acknowledgement,
+  ChangedEntity,
   ConflictBody,
+  FieldChange,
   Handoff,
+  HandoffDiff,
   HandoffSnapshot,
   Incident,
   SupplementalEvent,
+  SupplementalHandoff,
   TimelineEvent,
 } from './types.js';
 
@@ -87,6 +91,17 @@ export async function listSupplementalEvents(
   return rows;
 }
 
+export async function getSupplementalHandoffByParent(
+  parentHandoffId: string,
+  runner: QueryRunner = pool,
+): Promise<SupplementalHandoff | null> {
+  const { rows } = await runner.query<SupplementalHandoff>(
+    'SELECT * FROM supplemental_handoffs WHERE parent_handoff_id = $1',
+    [parentHandoffId],
+  );
+  return rows[0] ?? null;
+}
+
 /** Full aggregate for the incident view. */
 export async function getIncidentBundle(incidentId: string) {
   const incident = await getIncident(incidentId);
@@ -100,6 +115,7 @@ export async function getIncidentBundle(incidentId: string) {
       ...h,
       acknowledgements: await listAcknowledgements(h.id),
       supplemental_events: await listSupplementalEvents(h.id),
+      supplemental_handoff: await getSupplementalHandoffByParent(h.id),
     })),
   );
   return { incident, action_items: actionItems, timeline_events: timeline, handoffs: handoffDetails };
@@ -205,6 +221,7 @@ export async function updateActionItem(
 // ---------------------------------------------------------------------------
 
 export interface AddTimelineInput {
+  id?: string;
   kind: string;
   description: string;
   responsible_party: string;
@@ -219,7 +236,7 @@ export async function addTimelineEvent(
 ): Promise<TimelineEvent> {
   return withTransaction(async (client) => {
     await getIncident(incidentId, client); // 404 if missing
-    const id = genId('tl');
+    const id = input.id ?? genId('tl');
     const { rows } = await client.query<TimelineEvent>(
       `INSERT INTO timeline_events
          (id, incident_id, kind, description, responsible_party, evidence_uri, occurred_at)
@@ -244,6 +261,54 @@ export async function addTimelineEvent(
       payload: { timeline_event_id: id },
     });
     return event;
+  });
+}
+
+export interface CreateActionItemInput {
+  id?: string;
+  title: string;
+  detail?: string;
+  status?: ActionItemStatus;
+  responsible_party: string;
+  occurred_at: string;
+  actor: string;
+}
+
+/** Adds a new action item to an incident (used for post-sign-off follow-ups). */
+export async function createActionItem(
+  incidentId: string,
+  input: CreateActionItemInput,
+): Promise<ActionItem> {
+  if (input.status && !ACTION_ITEM_STATUSES.includes(input.status)) {
+    throw new ValidationError(`invalid status: ${input.status}`);
+  }
+  return withTransaction(async (client) => {
+    await getIncident(incidentId, client);
+    const id = input.id ?? genId('ai');
+    const { rows } = await client.query<ActionItem>(
+      `INSERT INTO action_items
+         (id, incident_id, title, detail, status, responsible_party, occurred_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [
+        id,
+        incidentId,
+        input.title,
+        input.detail ?? '',
+        input.status ?? 'open',
+        input.responsible_party,
+        input.occurred_at,
+      ],
+    );
+    const item = rows[0]!;
+    await writeAudit(client, {
+      incidentId,
+      handoffId: null,
+      eventType: 'action_item.created',
+      actor: input.actor,
+      payload: { item_id: id },
+    });
+    return item;
   });
 }
 
@@ -450,8 +515,191 @@ export async function addSupplementalEvent(
 }
 
 // ---------------------------------------------------------------------------
-// Per-item acknowledgements (idempotent, one per item per handoff)
+// Supplemental handoff packages (structured field-level diff vs parent snapshot)
 // ---------------------------------------------------------------------------
+
+// Fields we compare when diffing an item against the parent's frozen snapshot.
+const ACTION_ITEM_DIFF_FIELDS = ['title', 'detail', 'status', 'responsible_party'] as const;
+const TIMELINE_DIFF_FIELDS = ['kind', 'description', 'responsible_party', 'evidence_uri'] as const;
+
+function diffEntity<T extends { id: string }>(
+  before: T,
+  after: T,
+  fields: readonly string[],
+): ChangedEntity | null {
+  const changes: FieldChange[] = [];
+  for (const field of fields) {
+    const from = (before as Record<string, unknown>)[field];
+    const to = (after as Record<string, unknown>)[field];
+    if (from !== to) changes.push({ field, from, to });
+  }
+  return changes.length > 0 ? { id: after.id, changes } : null;
+}
+
+/**
+ * Computes what has been added or changed in the incident since the parent
+ * handoff's frozen snapshot. Only new/changed entities are captured — untouched
+ * items are omitted so the supplemental package is a pure delta.
+ */
+export function computeDiff(
+  snapshot: HandoffSnapshot,
+  liveActionItems: ActionItem[],
+  liveTimeline: TimelineEvent[],
+  parentHandoffId: string,
+): HandoffDiff {
+  const snapActionById = new Map(snapshot.action_items.map((a) => [a.id, a]));
+  const snapTimelineById = new Map(snapshot.timeline_events.map((t) => [t.id, t]));
+
+  const added_action_items: ActionItem[] = [];
+  const changed_action_items: ChangedEntity[] = [];
+  for (const item of liveActionItems) {
+    const before = snapActionById.get(item.id);
+    if (!before) {
+      added_action_items.push(item);
+    } else {
+      const changed = diffEntity(before, item, ACTION_ITEM_DIFF_FIELDS);
+      if (changed) changed_action_items.push(changed);
+    }
+  }
+
+  const added_timeline_events: TimelineEvent[] = [];
+  const changed_timeline_events: ChangedEntity[] = [];
+  for (const ev of liveTimeline) {
+    const before = snapTimelineById.get(ev.id);
+    if (!before) {
+      added_timeline_events.push(ev);
+    } else {
+      const changed = diffEntity(before, ev, TIMELINE_DIFF_FIELDS);
+      if (changed) changed_timeline_events.push(changed);
+    }
+  }
+
+  return {
+    parent_handoff_id: parentHandoffId,
+    parent_captured_at: snapshot.captured_at,
+    computed_at: new Date().toISOString(),
+    added_action_items,
+    added_timeline_events,
+    changed_action_items,
+    changed_timeline_events,
+  };
+}
+
+export interface CreateSupplementalHandoffInput {
+  from_shift: string;
+  to_shift: string;
+  summary?: string;
+  created_by: string;
+  idempotencyKey?: string;
+}
+
+/**
+ * Creates a supplemental handoff *package* against a signed parent handoff.
+ *
+ * The package snapshots ONLY the additions/changes relative to the parent's
+ * frozen snapshot and stores them as a structured, field-level diff. The parent
+ * handoff (its responsible party, status, version and acknowledgements) is never
+ * touched.
+ *
+ * Concurrency & idempotency guarantees — all yield exactly one package, one diff
+ * and one audit event:
+ *   * UNIQUE(parent_handoff_id) + INSERT ... ON CONFLICT DO NOTHING collapses
+ *     concurrent creates to a single row.
+ *   * A retried request with the same idempotency key replays the stored result.
+ */
+export async function createSupplementalHandoff(
+  incidentId: string,
+  parentHandoffId: string,
+  input: CreateSupplementalHandoffInput,
+): Promise<{ supplemental: SupplementalHandoff; duplicate: boolean }> {
+  return withTransaction(async (client) => {
+    if (input.idempotencyKey) {
+      const replayed = await replayIdempotent<SupplementalHandoff>(
+        client,
+        input.idempotencyKey,
+        'supplemental_handoff',
+      );
+      if (replayed) return { supplemental: replayed, duplicate: true };
+    }
+
+    // Lock the parent so concurrent creators serialize behind this read.
+    const { rows: parentRows } = await client.query<Handoff>(
+      'SELECT * FROM handoffs WHERE id = $1 AND incident_id = $2 FOR UPDATE',
+      [parentHandoffId, incidentId],
+    );
+    if (parentRows.length === 0) throw new NotFoundError('handoff', parentHandoffId);
+    const parent = parentRows[0]!;
+    if (parent.status !== 'signed' || !parent.snapshot) {
+      throw new ValidationError(
+        'a supplemental handoff package can only be created against a signed handoff',
+      );
+    }
+
+    // If a package already exists for this parent, return it (safe replay).
+    const existing = await getSupplementalHandoffByParent(parentHandoffId, client);
+    if (existing) {
+      if (input.idempotencyKey) {
+        await storeIdempotent(client, input.idempotencyKey, 'supplemental_handoff', existing);
+      }
+      return { supplemental: existing, duplicate: true };
+    }
+
+    // Compute the delta vs the parent's frozen snapshot from live state.
+    const liveActionItems = await listActionItems(incidentId, client);
+    const liveTimeline = await listTimelineEvents(incidentId, client);
+    const diff = computeDiff(parent.snapshot, liveActionItems, liveTimeline, parentHandoffId);
+
+    const id = genId('shp');
+    const inserted = await client.query<SupplementalHandoff>(
+      `INSERT INTO supplemental_handoffs
+         (id, incident_id, parent_handoff_id, from_shift, to_shift, summary, diff, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (parent_handoff_id) DO NOTHING
+       RETURNING *`,
+      [
+        id,
+        incidentId,
+        parentHandoffId,
+        input.from_shift,
+        input.to_shift,
+        input.summary ?? '',
+        JSON.stringify(diff),
+        input.created_by,
+      ],
+    );
+
+    // Lost the race: another transaction created the package first. Read it back
+    // so we still return exactly one package (and write no second audit event).
+    if (inserted.rows.length === 0) {
+      const winner = (await getSupplementalHandoffByParent(parentHandoffId, client))!;
+      if (input.idempotencyKey) {
+        await storeIdempotent(client, input.idempotencyKey, 'supplemental_handoff', winner);
+      }
+      return { supplemental: winner, duplicate: true };
+    }
+
+    const supplemental = inserted.rows[0]!;
+    await writeAudit(client, {
+      incidentId,
+      handoffId: parentHandoffId,
+      eventType: 'handoff.supplemental_package_created',
+      actor: input.created_by,
+      payload: {
+        supplemental_handoff_id: id,
+        parent_handoff_id: parentHandoffId,
+        added_action_items: diff.added_action_items.map((a) => a.id),
+        added_timeline_events: diff.added_timeline_events.map((t) => t.id),
+        changed_action_items: diff.changed_action_items.map((c) => c.id),
+        changed_timeline_events: diff.changed_timeline_events.map((c) => c.id),
+      },
+    });
+
+    if (input.idempotencyKey) {
+      await storeIdempotent(client, input.idempotencyKey, 'supplemental_handoff', supplemental);
+    }
+    return { supplemental, duplicate: false };
+  });
+}
 
 export interface AcknowledgeInput {
   item_type: 'action_item' | 'timeline_event';
@@ -596,8 +844,9 @@ async function storeIdempotent(
 export async function resetForTests(): Promise<void> {
   await withTransaction(async (client) => {
     await client.query(`
-      TRUNCATE idempotency_keys, audit_events, supplemental_events, acknowledgements,
-               handoffs, timeline_events, action_items, incidents RESTART IDENTITY CASCADE;
+      TRUNCATE idempotency_keys, audit_events, supplemental_handoffs, supplemental_events,
+               acknowledgements, handoffs, timeline_events, action_items, incidents
+               RESTART IDENTITY CASCADE;
     `);
     await client.query(
       `INSERT INTO incidents (id, title, severity, status, responsible_party, occurred_at)

@@ -54,6 +54,39 @@ export interface SupplementalEvent {
   occurred_at: string;
 }
 
+export interface FieldChange {
+  field: string;
+  from: unknown;
+  to: unknown;
+}
+
+export interface ChangedEntity {
+  id: string;
+  changes: FieldChange[];
+}
+
+export interface HandoffDiff {
+  parent_handoff_id: string;
+  parent_captured_at: string;
+  computed_at: string;
+  added_action_items: ActionItem[];
+  added_timeline_events: TimelineEvent[];
+  changed_action_items: ChangedEntity[];
+  changed_timeline_events: ChangedEntity[];
+}
+
+export interface SupplementalHandoff {
+  id: string;
+  incident_id: string;
+  parent_handoff_id: string;
+  from_shift: string;
+  to_shift: string;
+  summary: string;
+  diff: HandoffDiff;
+  created_by: string;
+  created_at: string;
+}
+
 export interface Handoff {
   id: string;
   incident_id: string;
@@ -74,6 +107,7 @@ export interface Handoff {
   version: number;
   acknowledgements: Acknowledgement[];
   supplemental_events: SupplementalEvent[];
+  supplemental_handoff: SupplementalHandoff | null;
 }
 
 export interface IncidentBundle {

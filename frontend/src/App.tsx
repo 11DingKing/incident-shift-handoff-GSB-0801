@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from './api';
-import type { ActionItem, ConflictBody, Handoff, IncidentBundle } from './types';
+import type {
+  ActionItem,
+  ChangedEntity,
+  ConflictBody,
+  Handoff,
+  HandoffDiff,
+  IncidentBundle,
+  SupplementalHandoff,
+} from './types';
 
 const INCIDENT_ID = 'inc-gd-20260729-01';
 const POLL_MS = 3000;
@@ -473,6 +481,16 @@ function HandoffCard(props: {
       </div>
 
       {signed && (
+        <SupplementalHandoffBlock
+          handoff={handoff}
+          bundle={bundle}
+          operator={operator}
+          onChanged={onChanged}
+          announce={announce}
+        />
+      )}
+
+      {signed && (
         <SupplementalBlock
           handoff={handoff}
           bundle={bundle}
@@ -482,6 +500,199 @@ function HandoffCard(props: {
         />
       )}
     </article>
+  );
+}
+
+function SupplementalHandoffBlock(props: {
+  handoff: Handoff;
+  bundle: IncidentBundle;
+  operator: string;
+  onChanged: () => Promise<void>;
+  announce: (msg: string) => void;
+}) {
+  const { handoff, bundle, operator, onChanged, announce } = props;
+  const [busy, setBusy] = useState(false);
+  const [fromShift, setFromShift] = useState(handoff.to_shift);
+  const [toShift, setToShift] = useState('夜班');
+  const [summary, setSummary] = useState('');
+  // Stable idempotency key per mounted card so retries reuse the same key and
+  // never produce a second package.
+  const keyRef = useRef(newKey('supp-pkg'));
+
+  const pkg = handoff.supplemental_handoff;
+
+  const create = async () => {
+    setBusy(true);
+    try {
+      await api.createSupplementalHandoff(
+        bundle.incident.id,
+        handoff.id,
+        { from_shift: fromShift, to_shift: toShift, summary, created_by: operator },
+        keyRef.current,
+      );
+      announce('已创建补充交接包，仅快照签收后的新增与变化');
+      await onChanged();
+    } catch (err) {
+      announce(`创建补充交接包失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="supplemental-package" data-testid={`supp-pkg-block-${handoff.id}`}>
+      <h3>补充交接包（差异快照）</h3>
+      {!pkg ? (
+        <form
+          className="supp-pkg-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void create();
+          }}
+        >
+          <label>
+            交出班次
+            <input
+              value={fromShift}
+              onChange={(e) => setFromShift(e.target.value)}
+              aria-label={`补充包交出班次 ${handoff.id}`}
+            />
+          </label>
+          <label>
+            接入班次
+            <input
+              value={toShift}
+              onChange={(e) => setToShift(e.target.value)}
+              aria-label={`补充包接入班次 ${handoff.id}`}
+            />
+          </label>
+          <label className="wide">
+            摘要
+            <input
+              value={summary}
+              onChange={(e) => setSummary(e.target.value)}
+              placeholder="例如：东侧绕行路线重新开放"
+              aria-label={`补充包摘要 ${handoff.id}`}
+              data-testid={`supp-pkg-summary-${handoff.id}`}
+            />
+          </label>
+          <button type="submit" disabled={busy} data-testid={`create-supp-pkg-${handoff.id}`}>
+            创建补充交接包
+          </button>
+        </form>
+      ) : (
+        <ParentVsDiff handoff={handoff} pkg={pkg} />
+      )}
+    </div>
+  );
+}
+
+/** Renders the parent frozen snapshot and the supplemental diff side by side. */
+function ParentVsDiff({ handoff, pkg }: { handoff: Handoff; pkg: SupplementalHandoff }) {
+  const snapshot = handoff.snapshot;
+  const diff = pkg.diff;
+  return (
+    <div className="side-by-side" data-testid={`supp-pkg-${handoff.id}`}>
+      <section className="pane parent-pane" aria-label="父交接快照" data-testid={`parent-pane-${handoff.id}`}>
+        <h4>父交接快照（已冻结）</h4>
+        <p className="item-meta">
+          快照时间：
+          {snapshot ? new Date(snapshot.captured_at).toLocaleString('zh-CN') : '—'}
+        </p>
+        <strong>行动项</strong>
+        <ul className="items">
+          {snapshot?.action_items.map((a) => (
+            <li key={a.id} data-testid={`parent-action-${handoff.id}-${a.id}`}>
+              {a.title} <span className="badge">{STATUS_LABELS[a.status]}</span>{' '}
+              <span className="item-meta">{a.responsible_party}</span>
+            </li>
+          ))}
+        </ul>
+        <strong>时间线</strong>
+        <ul className="items">
+          {snapshot?.timeline_events.map((t) => (
+            <li key={t.id} data-testid={`parent-timeline-${handoff.id}-${t.id}`}>
+              <span className="badge">{t.kind}</span> {t.description}
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section className="pane diff-pane" aria-label="补充差异" data-testid={`diff-pane-${handoff.id}`}>
+        <h4>
+          补充差异（{pkg.from_shift} → {pkg.to_shift}）
+        </h4>
+        {pkg.summary && <p className="summary">{pkg.summary}</p>}
+        <DiffLists handoffId={handoff.id} diff={diff} />
+      </section>
+    </div>
+  );
+}
+
+function DiffLists({ handoffId, diff }: { handoffId: string; diff: HandoffDiff }) {
+  const empty =
+    diff.added_action_items.length === 0 &&
+    diff.added_timeline_events.length === 0 &&
+    diff.changed_action_items.length === 0 &&
+    diff.changed_timeline_events.length === 0;
+
+  if (empty) {
+    return <p data-testid={`diff-empty-${handoffId}`}>签收后无新增或变化。</p>;
+  }
+
+  const renderChanges = (c: ChangedEntity) => (
+    <li key={c.id} data-testid={`diff-changed-${handoffId}-${c.id}`}>
+      <code>{c.id}</code>
+      <ul>
+        {c.changes.map((ch) => (
+          <li key={ch.field} data-testid={`diff-change-${handoffId}-${c.id}-${ch.field}`}>
+            字段「{ch.field}」：{String(ch.from)} → <strong>{String(ch.to)}</strong>
+          </li>
+        ))}
+      </ul>
+    </li>
+  );
+
+  return (
+    <>
+      {diff.added_action_items.length > 0 && (
+        <div>
+          <strong>新增行动项</strong>
+          <ul className="items">
+            {diff.added_action_items.map((a) => (
+              <li key={a.id} data-testid={`diff-added-action-${handoffId}-${a.id}`}>
+                {a.title} <span className="badge">{STATUS_LABELS[a.status]}</span>{' '}
+                <span className="item-meta">{a.responsible_party}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {diff.added_timeline_events.length > 0 && (
+        <div>
+          <strong>新增时间线</strong>
+          <ul className="items">
+            {diff.added_timeline_events.map((t) => (
+              <li key={t.id} data-testid={`diff-added-timeline-${handoffId}-${t.id}`}>
+                <span className="badge">{t.kind}</span> {t.description}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {diff.changed_action_items.length > 0 && (
+        <div>
+          <strong>变化的行动项</strong>
+          <ul className="items">{diff.changed_action_items.map(renderChanges)}</ul>
+        </div>
+      )}
+      {diff.changed_timeline_events.length > 0 && (
+        <div>
+          <strong>变化的时间线</strong>
+          <ul className="items">{diff.changed_timeline_events.map(renderChanges)}</ul>
+        </div>
+      )}
+    </>
   );
 }
 

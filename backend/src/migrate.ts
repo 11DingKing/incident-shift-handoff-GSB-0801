@@ -13,10 +13,11 @@ async function main(): Promise<void> {
     // Drop everything so `db:reset` gives a clean slate for local dev / tests.
     await pool.query(`
       DROP TABLE IF EXISTS
-        idempotency_keys, audit_events, supplemental_events, acknowledgements,
-        handoffs, timeline_events, action_items, incidents,
+        idempotency_keys, audit_events, supplemental_handoffs, supplemental_events,
+        acknowledgements, handoffs, timeline_events, action_items, incidents,
         schema_migrations CASCADE;
       DROP FUNCTION IF EXISTS reject_signed_handoff_update() CASCADE;
+      DROP FUNCTION IF EXISTS reject_supplemental_handoff_update() CASCADE;
     `);
     console.log('reset: dropped existing objects');
   }

@@ -95,9 +95,24 @@ npm start                     # 启动已编译服务（默认 http://0.0.0.0:80
 | `POST /api/incidents/:id/handoffs/:handoffId/sign-off` | 签收（原子冻结快照，支持 `Idempotency-Key`） |
 | `GET /api/handoffs/:handoffId` | 交接包详情（含快照 / 确认 / 补充事件） |
 | `POST /api/handoffs/:handoffId/acknowledgements` | 逐项确认（幂等，支持 `Idempotency-Key`） |
-| `POST /api/incidents/:id/handoffs/:handoffId/supplemental` | 为已签收交接包追加补充事件 |
+| `POST /api/incidents/:id/action-items` | 新增行动项（可指定 `id`，如 `ai-gd-20260729-03`） |
+| `POST /api/incidents/:id/timeline` | 追加时间线（可指定 `id`，如 `ev-gd-20260729-03`） |
+| `POST /api/incidents/:id/handoffs/:handoffId/supplemental` | 为已签收交接包追加补充事件（纯文本） |
+| `POST /api/incidents/:id/handoffs/:handoffId/supplemental-handoff` | 创建**补充交接包**（结构化字段级差异，幂等，每个父包唯一） |
 
 `Idempotency-Key` 通过请求头 `Idempotency-Key:` 或请求体 `idempotency_key` 传入。
+
+### 补充交接包（Supplemental Handoff Package）
+
+已签收父包之后若发生变化，除了可追加补充事件文本，还可创建**补充交接包**：
+
+- 只快照父包**签收后**的新增与变化，并保存为结构化的**字段级差异**
+  （`added_action_items` / `added_timeline_events` / `changed_action_items` /
+  `changed_timeline_events`，每项 `changes` 精确到 `{field, from, to}`）。
+- 显式关联父包（`parent_handoff_id`）；父包的责任人、状态、版本号、快照与确认记录**保持不变**。
+- **每个父包至多一个补充包**：数据库 `UNIQUE(parent_handoff_id)` + `INSERT ... ON CONFLICT DO NOTHING`。
+  并发创建、以及同一 `Idempotency-Key` 重试都只产生**一个补充包、一组差异、一条审计事件**。
+- 补充包本身也不可变（触发器拒绝 UPDATE）。差异 = 父包冻结快照 vs 当前实时状态。
 
 ---
 
