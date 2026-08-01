@@ -133,7 +133,7 @@ export function buildApp(): FastifyInstance {
     const [acknowledgements, supplemental_events, supplemental_handoff] = await Promise.all([
       svc.listAcknowledgements(handoffId),
       svc.listSupplementalEvents(handoffId),
-      svc.getSupplementalHandoffByParent(handoffId),
+      svc.getSupplementalHandoffDetail(handoffId),
     ]);
     return { ...handoff, acknowledgements, supplemental_events, supplemental_handoff };
   });
@@ -153,7 +153,8 @@ export function buildApp(): FastifyInstance {
     });
   });
 
-  // Per-item acknowledgement (idempotent).
+  // Per-item acknowledgement on the PARENT handoff (idempotent). Optional
+  // expected_version enables a field-level conflict for stale action-item acks.
   app.post('/api/handoffs/:handoffId/acknowledgements', async (req, reply) => {
     const { handoffId } = req.params as { handoffId: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -169,6 +170,33 @@ export function buildApp(): FastifyInstance {
       item_id: requireString(body, 'item_id'),
       acknowledged_by: requireString(body, 'acknowledged_by'),
       note: body.note as string | undefined,
+      expectedVersion: body.expected_version as number | undefined,
+      idempotencyKey,
+    });
+    reply.code(duplicate ? 200 : 201);
+    return { ...acknowledgement, duplicate };
+  });
+
+  // Per-item acknowledgement on a SUPPLEMENTAL PACKAGE. Scoped independently of
+  // the parent handoff; action-item acks are version-checked (field-level 409).
+  app.post('/api/supplemental-handoffs/:suppId/acknowledgements', async (req, reply) => {
+    const { suppId } = req.params as { suppId: string };
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const idempotencyKey =
+      (req.headers['idempotency-key'] as string | undefined) ??
+      (body.idempotency_key as string | undefined);
+    const itemType = requireString(body, 'item_type');
+    if (itemType !== 'action_item' && itemType !== 'timeline_event') {
+      throw new ValidationError('item_type must be action_item or timeline_event');
+    }
+    const parentHandoffId = requireString(body, 'parent_handoff_id');
+    const { acknowledgement, duplicate } = await svc.acknowledgeItem(parentHandoffId, {
+      item_type: itemType,
+      item_id: requireString(body, 'item_id'),
+      acknowledged_by: requireString(body, 'acknowledged_by'),
+      note: body.note as string | undefined,
+      supplementalHandoffId: suppId,
+      expectedVersion: body.expected_version as number | undefined,
       idempotencyKey,
     });
     reply.code(duplicate ? 200 : 201);

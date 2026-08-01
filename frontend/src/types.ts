@@ -37,8 +37,10 @@ export interface TimelineEvent {
 export interface Acknowledgement {
   id: string;
   handoff_id: string;
+  supplemental_handoff_id: string | null;
   item_type: 'action_item' | 'timeline_event';
   item_id: string;
+  acked_version: number | null;
   acknowledged_by: string;
   note: string;
   acknowledged_at: string;
@@ -85,6 +87,7 @@ export interface SupplementalHandoff {
   diff: HandoffDiff;
   created_by: string;
   created_at: string;
+  acknowledgements: Acknowledgement[];
 }
 
 export interface Handoff {

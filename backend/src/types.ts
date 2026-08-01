@@ -64,8 +64,10 @@ export interface HandoffSnapshot {
 export interface Acknowledgement {
   id: string;
   handoff_id: string;
+  supplemental_handoff_id: string | null;
   item_type: 'action_item' | 'timeline_event';
   item_id: string;
+  acked_version: number | null;
   acknowledged_by: string;
   note: string;
   acknowledged_at: string;

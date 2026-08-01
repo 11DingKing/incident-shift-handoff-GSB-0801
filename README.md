@@ -94,7 +94,8 @@ npm start                     # 启动已编译服务（默认 http://0.0.0.0:80
 | `POST /api/incidents/:id/handoffs` | 创建交接草稿 |
 | `POST /api/incidents/:id/handoffs/:handoffId/sign-off` | 签收（原子冻结快照，支持 `Idempotency-Key`） |
 | `GET /api/handoffs/:handoffId` | 交接包详情（含快照 / 确认 / 补充事件） |
-| `POST /api/handoffs/:handoffId/acknowledgements` | 逐项确认（幂等，支持 `Idempotency-Key`） |
+| `POST /api/handoffs/:handoffId/acknowledgements` | 逐项确认（幂等，支持 `Idempotency-Key`；行动项可带 `expected_version` 触发字段级冲突） |
+| `POST /api/supplemental-handoffs/:suppId/acknowledgements` | 对**补充包内**条目逐项确认（需 `parent_handoff_id`；行动项带 `expected_version` 做版本校验，与父包确认相互独立） |
 | `POST /api/incidents/:id/action-items` | 新增行动项（可指定 `id`，如 `ai-gd-20260729-03`） |
 | `POST /api/incidents/:id/timeline` | 追加时间线（可指定 `id`，如 `ev-gd-20260729-03`） |
 | `POST /api/incidents/:id/handoffs/:handoffId/supplemental` | 为已签收交接包追加补充事件（纯文本） |
@@ -113,6 +114,18 @@ npm start                     # 启动已编译服务（默认 http://0.0.0.0:80
 - **每个父包至多一个补充包**：数据库 `UNIQUE(parent_handoff_id)` + `INSERT ... ON CONFLICT DO NOTHING`。
   并发创建、以及同一 `Idempotency-Key` 重试都只产生**一个补充包、一组差异、一条审计事件**。
 - 补充包本身也不可变（触发器拒绝 UPDATE）。差异 = 父包冻结快照 vs 当前实时状态。
+
+#### 补充包内条目的逐项确认（带版本校验）
+
+补充包内的行动项（如 `ai-gd-20260729-03`）可被接班人逐项确认：
+
+- 确认作用域与父包**相互独立**（`acknowledgements.supplemental_handoff_id`）；
+  唯一性范围为 `(handoff_id, supplemental_handoff_id, item_type, item_id)`。
+- 行动项确认携带 `expected_version`：若确认时该行动项已被他人改动（版本落后），
+  返回 **HTTP 409 字段级冲突**（含各字段当前值），**不写入任何确认**。
+- 两个会话同时确认同一条目、其中一个携带旧版本：只有首次有效确认成功，
+  旧版本得到冲突；断线后用相同 `Idempotency-Key` 重试也**不会**多出第二份确认。
+- 确认既不改动父包，也**不会自动关闭**未确认的行动项。
 
 ---
 

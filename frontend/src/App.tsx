@@ -43,18 +43,25 @@ export function App() {
     }
   }, []);
 
-  // Initial load + real-time convergence via polling.
+  // Initial load + real-time convergence via polling. Polling can be paused via
+  // a test-only window hook so deterministic stale-version scenarios are possible.
   useEffect(() => {
     void refresh();
-    const t = setInterval(() => void refresh(), POLL_MS);
+    const t = setInterval(() => {
+      if ((window as unknown as { __pausePolling?: boolean }).__pausePolling) return;
+      void refresh();
+    }, POLL_MS);
     return () => clearInterval(t);
   }, [refresh]);
 
-  // After each render, restore focus if an action requested it.
+  // After each render, restore focus if an action requested it. We only consume
+  // the request once the target exists and is focusable (not disabled during an
+  // in-flight request), so focus reliably returns after the refetch settles.
   useEffect(() => {
-    if (restoreFocusRef.current) {
-      const el = document.getElementById(restoreFocusRef.current);
-      el?.focus();
+    if (!restoreFocusRef.current) return;
+    const el = document.getElementById(restoreFocusRef.current) as HTMLElement | null;
+    if (el && !(el as HTMLButtonElement).disabled) {
+      el.focus();
       restoreFocusRef.current = null;
     }
   });
@@ -125,6 +132,7 @@ export function App() {
         operator={operator}
         onChanged={refresh}
         announce={announce}
+        restoreFocusRef={restoreFocusRef}
       />
     </main>
   );
@@ -279,8 +287,9 @@ function HandoffSection(props: {
   operator: string;
   onChanged: () => Promise<void>;
   announce: (msg: string) => void;
+  restoreFocusRef: React.MutableRefObject<string | null>;
 }) {
-  const { bundle, operator, onChanged, announce } = props;
+  const { bundle, operator, onChanged, announce, restoreFocusRef } = props;
   const [creating, setCreating] = useState(false);
   const [fromShift, setFromShift] = useState('早班');
   const [toShift, setToShift] = useState('晚班');
@@ -339,6 +348,7 @@ function HandoffSection(props: {
           operator={operator}
           onChanged={onChanged}
           announce={announce}
+          restoreFocusRef={restoreFocusRef}
         />
       ))}
     </section>
@@ -351,8 +361,9 @@ function HandoffCard(props: {
   operator: string;
   onChanged: () => Promise<void>;
   announce: (msg: string) => void;
+  restoreFocusRef: React.MutableRefObject<string | null>;
 }) {
-  const { handoff, bundle, operator, onChanged, announce } = props;
+  const { handoff, bundle, operator, onChanged, announce, restoreFocusRef } = props;
   const [busy, setBusy] = useState(false);
   // A stable idempotency key per mounted card so retries reuse the same key.
   const signKeyRef = useRef(newKey('sign'));
@@ -487,6 +498,7 @@ function HandoffCard(props: {
           operator={operator}
           onChanged={onChanged}
           announce={announce}
+          restoreFocusRef={restoreFocusRef}
         />
       )}
 
@@ -509,15 +521,21 @@ function SupplementalHandoffBlock(props: {
   operator: string;
   onChanged: () => Promise<void>;
   announce: (msg: string) => void;
+  restoreFocusRef: React.MutableRefObject<string | null>;
 }) {
-  const { handoff, bundle, operator, onChanged, announce } = props;
+  const { handoff, bundle, operator, onChanged, announce, restoreFocusRef } = props;
   const [busy, setBusy] = useState(false);
   const [fromShift, setFromShift] = useState(handoff.to_shift);
   const [toShift, setToShift] = useState('夜班');
   const [summary, setSummary] = useState('');
+  // Field-level conflicts keyed by supplemental action-item id.
+  const [conflicts, setConflicts] = useState<Record<string, ConflictBody>>({});
   // Stable idempotency key per mounted card so retries reuse the same key and
   // never produce a second package.
   const keyRef = useRef(newKey('supp-pkg'));
+  // Stable per-item idempotency keys so a disconnected retry of the SAME
+  // confirmation reuses its key and never adds a second acknowledgement.
+  const ackKeys = useRef<Map<string, string>>(new Map());
 
   const pkg = handoff.supplemental_handoff;
 
@@ -534,6 +552,47 @@ function SupplementalHandoffBlock(props: {
       await onChanged();
     } catch (err) {
       announce(`创建补充交接包失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Acknowledge an action item that lives in the supplemental package. Carries
+  // the version the confirmer saw so a stale confirmation is rejected with a
+  // field-level conflict instead of confirming an outdated view.
+  const acknowledge = async (itemId: string, expectedVersion: number) => {
+    if (!pkg) return;
+    const controlId = `supp-ack-btn-${handoff.id}-${itemId}`;
+    restoreFocusRef.current = controlId; // restore focus here after the refetch
+    if (!ackKeys.current.has(itemId)) ackKeys.current.set(itemId, newKey('supp-ack'));
+    setBusy(true);
+    try {
+      const res = await api.acknowledgeSupplemental(
+        pkg.id,
+        {
+          parent_handoff_id: handoff.id,
+          item_type: 'action_item',
+          item_id: itemId,
+          acknowledged_by: operator,
+          expected_version: expectedVersion,
+        },
+        ackKeys.current.get(itemId)!,
+      );
+      setConflicts((c) => {
+        const next = { ...c };
+        delete next[itemId];
+        return next;
+      });
+      announce(res.duplicate ? '该补充项已确认（重复提交已忽略）' : '已确认该补充项');
+      await onChanged();
+    } catch (err) {
+      if (err instanceof ApiError && err.conflict) {
+        setConflicts((c) => ({ ...c, [itemId]: err.conflict! }));
+        announce('补充项版本已变化，确认被拒绝，请查看最新状态');
+        await onChanged();
+      } else {
+        announce(`确认失败：${err instanceof Error ? err.message : String(err)}`);
+      }
     } finally {
       setBusy(false);
     }
@@ -581,16 +640,46 @@ function SupplementalHandoffBlock(props: {
           </button>
         </form>
       ) : (
-        <ParentVsDiff handoff={handoff} pkg={pkg} />
+        <ParentVsDiff
+          handoff={handoff}
+          pkg={pkg}
+          bundle={bundle}
+          busy={busy}
+          conflicts={conflicts}
+          onAcknowledge={acknowledge}
+          onDismissConflict={(itemId) =>
+            setConflicts((c) => {
+              const next = { ...c };
+              delete next[itemId];
+              return next;
+            })
+          }
+        />
       )}
     </div>
   );
 }
 
 /** Renders the parent frozen snapshot and the supplemental diff side by side. */
-function ParentVsDiff({ handoff, pkg }: { handoff: Handoff; pkg: SupplementalHandoff }) {
+function ParentVsDiff(props: {
+  handoff: Handoff;
+  pkg: SupplementalHandoff;
+  bundle: IncidentBundle;
+  busy: boolean;
+  conflicts: Record<string, ConflictBody>;
+  onAcknowledge: (itemId: string, expectedVersion: number) => void;
+  onDismissConflict: (itemId: string) => void;
+}) {
+  const { handoff, pkg, bundle, busy, conflicts, onAcknowledge, onDismissConflict } = props;
   const snapshot = handoff.snapshot;
   const diff = pkg.diff;
+  // Live action items let us know the current version to confirm against.
+  const liveById = new Map(bundle.action_items.map((a) => [a.id, a]));
+  const ackedIds = new Set(
+    pkg.acknowledgements
+      .filter((a) => a.item_type === 'action_item')
+      .map((a) => a.item_id),
+  );
   return (
     <div className="side-by-side" data-testid={`supp-pkg-${handoff.id}`}>
       <section className="pane parent-pane" aria-label="父交接快照" data-testid={`parent-pane-${handoff.id}`}>
@@ -623,13 +712,33 @@ function ParentVsDiff({ handoff, pkg }: { handoff: Handoff; pkg: SupplementalHan
           补充差异（{pkg.from_shift} → {pkg.to_shift}）
         </h4>
         {pkg.summary && <p className="summary">{pkg.summary}</p>}
-        <DiffLists handoffId={handoff.id} diff={diff} />
+        <DiffLists
+          handoffId={handoff.id}
+          diff={diff}
+          liveById={liveById}
+          ackedIds={ackedIds}
+          busy={busy}
+          conflicts={conflicts}
+          onAcknowledge={onAcknowledge}
+          onDismissConflict={onDismissConflict}
+        />
       </section>
     </div>
   );
 }
 
-function DiffLists({ handoffId, diff }: { handoffId: string; diff: HandoffDiff }) {
+function DiffLists(props: {
+  handoffId: string;
+  diff: HandoffDiff;
+  liveById: Map<string, ActionItem>;
+  ackedIds: Set<string>;
+  busy: boolean;
+  conflicts: Record<string, ConflictBody>;
+  onAcknowledge: (itemId: string, expectedVersion: number) => void;
+  onDismissConflict: (itemId: string) => void;
+}) {
+  const { handoffId, diff, liveById, ackedIds, busy, conflicts, onAcknowledge, onDismissConflict } =
+    props;
   const empty =
     diff.added_action_items.length === 0 &&
     diff.added_timeline_events.length === 0 &&
@@ -659,12 +768,65 @@ function DiffLists({ handoffId, diff }: { handoffId: string; diff: HandoffDiff }
         <div>
           <strong>新增行动项</strong>
           <ul className="items">
-            {diff.added_action_items.map((a) => (
-              <li key={a.id} data-testid={`diff-added-action-${handoffId}-${a.id}`}>
-                {a.title} <span className="badge">{STATUS_LABELS[a.status]}</span>{' '}
-                <span className="item-meta">{a.responsible_party}</span>
-              </li>
-            ))}
+            {diff.added_action_items.map((a) => {
+              // Confirm against the CURRENT live version so a stale confirmation
+              // is rejected; fall back to the diff-captured version if the item
+              // is no longer in the live list.
+              const live = liveById.get(a.id);
+              const version = live ? live.version : a.version;
+              const done = ackedIds.has(a.id);
+              const conflict = conflicts[a.id];
+              return (
+                <li key={a.id} data-testid={`diff-added-action-${handoffId}-${a.id}`}>
+                  {a.title} <span className="badge">{STATUS_LABELS[live ? live.status : a.status]}</span>{' '}
+                  <span className="item-meta">{a.responsible_party}</span>{' '}
+                  <span className="version" data-testid={`supp-item-version-${handoffId}-${a.id}`}>
+                    v{version}
+                  </span>{' '}
+                  {done ? (
+                    <span
+                      className="badge status-done"
+                      data-testid={`supp-acked-${handoffId}-${a.id}`}
+                    >
+                      已确认
+                    </span>
+                  ) : (
+                    <button
+                      id={`supp-ack-btn-${handoffId}-${a.id}`}
+                      disabled={busy}
+                      data-testid={`supp-ack-btn-${handoffId}-${a.id}`}
+                      onClick={() => onAcknowledge(a.id, version)}
+                    >
+                      确认
+                    </button>
+                  )}
+                  {conflict && (
+                    <div
+                      role="alert"
+                      className="conflict"
+                      data-testid={`supp-conflict-${handoffId}-${a.id}`}
+                    >
+                      版本冲突：您确认的是 v{conflict.expected_version}，当前 v
+                      {conflict.actual_version}。确认未生效。
+                      {Object.entries(conflict.conflicts).map(([field, info]) => (
+                        <div
+                          key={field}
+                          data-testid={`supp-conflict-field-${handoffId}-${a.id}-${field}`}
+                        >
+                          字段「{field}」最新值：{String(info.current)}
+                        </div>
+                      ))}
+                      <button
+                        data-testid={`supp-conflict-dismiss-${handoffId}-${a.id}`}
+                        onClick={() => onDismissConflict(a.id)}
+                      >
+                        我已了解最新状态
+                      </button>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

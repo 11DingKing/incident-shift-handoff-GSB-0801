@@ -73,9 +73,25 @@ export async function listAcknowledgements(
   handoffId: string,
   runner: QueryRunner = pool,
 ): Promise<Acknowledgement[]> {
+  // Parent-scope acks only (supplemental-package acks are listed separately).
   const { rows } = await runner.query<Acknowledgement>(
-    'SELECT * FROM acknowledgements WHERE handoff_id = $1 ORDER BY acknowledged_at, id',
+    `SELECT * FROM acknowledgements
+     WHERE handoff_id = $1 AND supplemental_handoff_id IS NULL
+     ORDER BY acknowledged_at, id`,
     [handoffId],
+  );
+  return rows;
+}
+
+export async function listSupplementalAcknowledgements(
+  supplementalHandoffId: string,
+  runner: QueryRunner = pool,
+): Promise<Acknowledgement[]> {
+  const { rows } = await runner.query<Acknowledgement>(
+    `SELECT * FROM acknowledgements
+     WHERE supplemental_handoff_id = $1
+     ORDER BY acknowledged_at, id`,
+    [supplementalHandoffId],
   );
   return rows;
 }
@@ -102,6 +118,20 @@ export async function getSupplementalHandoffByParent(
   return rows[0] ?? null;
 }
 
+/**
+ * Supplemental package for a parent handoff, enriched with its own
+ * (supplemental-scoped) acknowledgements. Returns null when no package exists.
+ */
+export async function getSupplementalHandoffDetail(
+  parentHandoffId: string,
+  runner: QueryRunner = pool,
+): Promise<(SupplementalHandoff & { acknowledgements: Acknowledgement[] }) | null> {
+  const pkg = await getSupplementalHandoffByParent(parentHandoffId, runner);
+  if (!pkg) return null;
+  const acknowledgements = await listSupplementalAcknowledgements(pkg.id, runner);
+  return { ...pkg, acknowledgements };
+}
+
 /** Full aggregate for the incident view. */
 export async function getIncidentBundle(incidentId: string) {
   const incident = await getIncident(incidentId);
@@ -115,7 +145,7 @@ export async function getIncidentBundle(incidentId: string) {
       ...h,
       acknowledgements: await listAcknowledgements(h.id),
       supplemental_events: await listSupplementalEvents(h.id),
-      supplemental_handoff: await getSupplementalHandoffByParent(h.id),
+      supplemental_handoff: await getSupplementalHandoffDetail(h.id),
     })),
   );
   return { incident, action_items: actionItems, timeline_events: timeline, handoffs: handoffDetails };
@@ -152,6 +182,34 @@ function buildConflict(
   return {
     error: 'version_conflict',
     message: `${entity} ${id} was modified by someone else (expected v${expectedVersion}, now v${current.version}).`,
+    entity,
+    id,
+    expected_version: expectedVersion,
+    actual_version: current.version as number,
+    conflicts,
+    current,
+  };
+}
+
+/**
+ * Conflict for a *stale acknowledgement*: the confirmer isn't editing fields, so
+ * we surface the current value of every comparable field so the UI can show what
+ * changed underneath them before they re-confirm.
+ */
+function buildStaleAckConflict(
+  entity: string,
+  id: string,
+  expectedVersion: number,
+  current: Record<string, unknown>,
+  fields: readonly string[],
+): ConflictBody {
+  const conflicts: Record<string, { current: unknown }> = {};
+  for (const key of fields) {
+    conflicts[key] = { current: current[key] };
+  }
+  return {
+    error: 'version_conflict',
+    message: `${entity} ${id} changed since you last saw it (you confirmed v${expectedVersion}, now v${current.version}); re-check before confirming.`,
     entity,
     id,
     expected_version: expectedVersion,
@@ -709,6 +767,21 @@ export interface AcknowledgeInput {
   idempotencyKey?: string;
 }
 
+export interface AcknowledgeInput {
+  item_type: 'action_item' | 'timeline_event';
+  item_id: string;
+  acknowledged_by: string;
+  note?: string;
+  idempotencyKey?: string;
+  // When set, the acknowledgement belongs to a supplemental package (identified
+  // by this id) rather than the parent handoff. Parent acks leave it undefined.
+  supplementalHandoffId?: string;
+  // The action_item.version the confirmer saw. When provided we reject a stale
+  // confirmation with a field-level conflict instead of confirming an outdated
+  // view. Ignored for timeline events (immutable evidence).
+  expectedVersion?: number;
+}
+
 export async function acknowledgeItem(
   handoffId: string,
   input: AcknowledgeInput,
@@ -729,13 +802,51 @@ export async function acknowledgeItem(
     );
     if (handoffRows.length === 0) throw new NotFoundError('handoff', handoffId);
 
-    // Enforce one acknowledgement per (handoff, item). A concurrent duplicate
-    // loses the unique-index race and is returned the existing row instead of a
-    // second confirmation.
+    const suppId = input.supplementalHandoffId ?? null;
+    if (suppId) {
+      // The supplemental package must exist and belong to this parent handoff.
+      const { rows } = await client.query<{ parent_handoff_id: string }>(
+        'SELECT parent_handoff_id FROM supplemental_handoffs WHERE id = $1',
+        [suppId],
+      );
+      if (rows.length === 0) throw new NotFoundError('supplemental_handoff', suppId);
+      if (rows[0]!.parent_handoff_id !== handoffId) {
+        throw new ValidationError(
+          `supplemental handoff ${suppId} does not belong to handoff ${handoffId}`,
+        );
+      }
+    }
+
+    // Version check for action items: reject a confirmation made against a stale
+    // version with a field-level conflict, writing no acknowledgement. This runs
+    // BEFORE the uniqueness insert so a stale racer never produces an ack.
+    if (input.item_type === 'action_item' && input.expectedVersion !== undefined) {
+      const { rows } = await client.query<ActionItem>(
+        'SELECT * FROM action_items WHERE id = $1 FOR SHARE',
+        [input.item_id],
+      );
+      if (rows.length === 0) throw new NotFoundError('action_item', input.item_id);
+      const current = rows[0]!;
+      if (current.version !== input.expectedVersion) {
+        throw new ConflictError(
+          buildStaleAckConflict('action_item', input.item_id, input.expectedVersion, current as never, [
+            'status',
+            'title',
+            'detail',
+            'responsible_party',
+          ]),
+        );
+      }
+    }
+
+    // Enforce one acknowledgement per (handoff, supplemental scope, item). A
+    // concurrent duplicate loses the unique-index race and is returned the
+    // existing row instead of a second confirmation.
     const existing = await client.query<Acknowledgement>(
       `SELECT * FROM acknowledgements
-       WHERE handoff_id = $1 AND item_type = $2 AND item_id = $3`,
-      [handoffId, input.item_type, input.item_id],
+       WHERE handoff_id = $1 AND COALESCE(supplemental_handoff_id, '') = COALESCE($2, '')
+         AND item_type = $3 AND item_id = $4`,
+      [handoffId, suppId, input.item_type, input.item_id],
     );
     if (existing.rows.length > 0) {
       const ack = existing.rows[0]!;
@@ -751,18 +862,29 @@ export async function acknowledgeItem(
     // lost the race and read back the winning acknowledgement.
     const inserted = await client.query<Acknowledgement>(
       `INSERT INTO acknowledgements
-         (id, handoff_id, item_type, item_id, acknowledged_by, note)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (handoff_id, item_type, item_id) DO NOTHING
+         (id, handoff_id, supplemental_handoff_id, item_type, item_id, acked_version, acknowledged_by, note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (handoff_id, COALESCE(supplemental_handoff_id, ''), item_type, item_id)
+         DO NOTHING
        RETURNING *`,
-      [id, handoffId, input.item_type, input.item_id, input.acknowledged_by, input.note ?? ''],
+      [
+        id,
+        handoffId,
+        suppId,
+        input.item_type,
+        input.item_id,
+        input.item_type === 'action_item' ? input.expectedVersion ?? null : null,
+        input.acknowledged_by,
+        input.note ?? '',
+      ],
     );
 
     if (inserted.rows.length === 0) {
       const { rows } = await client.query<Acknowledgement>(
         `SELECT * FROM acknowledgements
-         WHERE handoff_id = $1 AND item_type = $2 AND item_id = $3`,
-        [handoffId, input.item_type, input.item_id],
+         WHERE handoff_id = $1 AND COALESCE(supplemental_handoff_id, '') = COALESCE($2, '')
+           AND item_type = $3 AND item_id = $4`,
+        [handoffId, suppId, input.item_type, input.item_id],
       );
       const winner = rows[0]!;
       if (input.idempotencyKey) {
@@ -777,7 +899,12 @@ export async function acknowledgeItem(
       handoffId,
       eventType: 'item.acknowledged',
       actor: input.acknowledged_by,
-      payload: { item_type: input.item_type, item_id: input.item_id, ack_id: id },
+      payload: {
+        item_type: input.item_type,
+        item_id: input.item_id,
+        ack_id: id,
+        supplemental_handoff_id: suppId,
+      },
     });
 
     if (input.idempotencyKey) {

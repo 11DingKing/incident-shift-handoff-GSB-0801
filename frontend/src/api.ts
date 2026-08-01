@@ -72,12 +72,37 @@ export const api = {
 
   acknowledge: (
     handoffId: string,
-    payload: { item_type: 'action_item' | 'timeline_event'; item_id: string; acknowledged_by: string; note?: string },
+    payload: {
+      item_type: 'action_item' | 'timeline_event';
+      item_id: string;
+      acknowledged_by: string;
+      note?: string;
+      expected_version?: number;
+    },
     idempotencyKey: string,
   ) =>
     request<Acknowledgement & { duplicate: boolean }>(
       'POST',
       `/api/handoffs/${handoffId}/acknowledgements`,
+      payload,
+      { 'idempotency-key': idempotencyKey },
+    ),
+
+  acknowledgeSupplemental: (
+    suppId: string,
+    payload: {
+      parent_handoff_id: string;
+      item_type: 'action_item' | 'timeline_event';
+      item_id: string;
+      acknowledged_by: string;
+      note?: string;
+      expected_version?: number;
+    },
+    idempotencyKey: string,
+  ) =>
+    request<Acknowledgement & { duplicate: boolean }>(
+      'POST',
+      `/api/supplemental-handoffs/${suppId}/acknowledgements`,
       payload,
       { 'idempotency-key': idempotencyKey },
     ),
