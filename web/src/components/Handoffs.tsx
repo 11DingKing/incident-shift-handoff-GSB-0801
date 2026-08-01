@@ -24,6 +24,7 @@ export function Handoffs({
     toShift: '',
     note: '',
     createdBy: '',
+    parentHandoffId: '',
   });
   const [signedBy, setSignedBy] = useState('');
   const [confirmedBy, setConfirmedBy] = useState('');
@@ -31,6 +32,8 @@ export function Handoffs({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [suppKey, setSuppKey] = useState<string | null>(null);
+  const [createKey, setCreateKey] = useState<string | null>(null);
+  const [signKey, setSignKey] = useState<string | null>(null);
 
   const run = async (fn: () => Promise<void>) => {
     if (busy) return;
@@ -39,6 +42,13 @@ export function Handoffs({
     try {
       await fn();
     } catch (err) {
+      // 服务器已给出明确响应（如 409 冲突）时重置幂等键，允许修正后重新提交；
+      // 仅网络错误保留键，确保断线重试重放同一请求
+      if (!(err instanceof ApiError) || err.status !== 0) {
+        setCreateKey(null);
+        setSignKey(null);
+        setSuppKey(null);
+      }
       const msg =
         err instanceof ApiError
           ? `${err.message}（${err.body.code}）`
@@ -52,12 +62,20 @@ export function Handoffs({
 
   const createHandoff = () =>
     run(async () => {
+      const { parentHandoffId, ...rest } = createForm;
+      const key = createKey ?? crypto.randomUUID();
+      setCreateKey(key);
       const res = await api.post<{ handoff: Handoff }>(
         `/api/incidents/${incidentId}/handoffs`,
-        createForm,
-        crypto.randomUUID(),
+        parentHandoffId ? { ...rest, parentHandoffId } : rest,
+        key,
       );
-      announce(`交接包 ${res.handoff.id} 已创建（草稿）`);
+      setCreateKey(null);
+      announce(
+        parentHandoffId
+          ? `补充交接包 ${res.handoff.id} 已创建（草稿），基准父包 ${parentHandoffId}`
+          : `交接包 ${res.handoff.id} 已创建（草稿）`,
+      );
       onSelect(res.handoff.id);
       onChanged();
     });
@@ -65,11 +83,14 @@ export function Handoffs({
   const sign = () =>
     run(async () => {
       if (!detail) return;
+      const key = signKey ?? crypto.randomUUID();
+      setSignKey(key);
       await api.post(
         `/api/handoffs/${detail.handoff.id}/sign`,
         { signedBy, expectedVersion: detail.handoff.version },
-        crypto.randomUUID(),
+        key,
       );
+      setSignKey(null);
       announce(`交接包 ${detail.handoff.id} 已签收，快照已锁定`);
       onChanged();
     });
@@ -141,12 +162,31 @@ export function Handoffs({
               onChange={(e) => setCreateForm({ ...createForm, createdBy: e.target.value })}
             />
           </label>
+          <label>
+            父交接包（可选，创建补充包）
+            <select
+              data-focus-id="ho-create-parent"
+              value={createForm.parentHandoffId}
+              onChange={(e) =>
+                setCreateForm({ ...createForm, parentHandoffId: e.target.value })
+              }
+            >
+              <option value="">无（首轮交接）</option>
+              {handoffs
+                .filter((ho) => ho.status === 'signed')
+                .map((ho) => (
+                  <option key={ho.id} value={ho.id}>
+                    {ho.from_shift} → {ho.to_shift}（{ho.id}）
+                  </option>
+                ))}
+            </select>
+          </label>
           <button
             data-focus-id="ho-create-submit"
             disabled={busy || !createForm.fromShift || !createForm.toShift || !createForm.createdBy}
             onClick={createHandoff}
           >
-            创建
+            {createForm.parentHandoffId ? '创建补充包' : '创建'}
           </button>
         </div>
       </div>
@@ -181,9 +221,22 @@ export function Handoffs({
             <span className={`badge ${h.status === 'signed' ? 'status-verified' : ''}`}>
               {h.status === 'signed' ? '已签收（不可修改）' : '草稿'}
             </span>
+            {h.parent_handoff_id && <span className="badge kind-supplement">补充包</span>}
             <span className="mono muted">{h.id}</span>
             <span className="muted">v{h.version}</span>
           </div>
+          {h.parent_handoff_id && detail.parent && (
+            <div className="muted">
+              基准父交接包：
+              <button
+                className="link"
+                data-focus-id={`ho-open-parent-${h.id}`}
+                onClick={() => onSelect(h.parent_handoff_id)}
+              >
+                {detail.parent.from_shift} → {detail.parent.to_shift}（{detail.parent.id}）
+              </button>
+            </div>
+          )}
           {h.note && <div>备注:{h.note}</div>}
           <div className="muted">
             创建 {fmtTime(h.created_at)}（{h.created_by}）
@@ -250,6 +303,67 @@ export function Handoffs({
               </li>
             ))}
           </ul>
+
+          {h.status === 'signed' && detail.comparison && detail.parent && (
+            <div className="compare" data-testid="comparison">
+              <div className="card">
+                <h4>父快照（{detail.parent.id}）</h4>
+                <ul className="card-list">
+                  {detail.comparison.parentItems.map((p) => (
+                    <li key={p.id} className="muted">
+                      <strong>{p.title}</strong> <span className="mono">{p.id}</span>
+                      <br />
+                      责任方 {p.owner} ・ 状态 {p.status_at_sign} ・ v{p.version_at_sign}
+                      {p.confirmed && (
+                        <span className="confirmed">
+                          {' '}
+                          ✓ {p.confirmed_by}（
+                          {p.confirmed_at ? fmtTime(p.confirmed_at) : ''}）
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="card">
+                <h4>补充包差异（新增 {detail.comparison.added.length} ・ 变更{' '}
+                  {detail.comparison.changed.length} ・ 未变化{' '}
+                  {detail.comparison.unchanged.length}）</h4>
+                <ul className="card-list">
+                  {detail.comparison.added.map((i) => (
+                    <li key={i.id} data-testid={`cmp-added-${i.id}`}>
+                      <span className="badge status-done">新增</span> <strong>{i.title}</strong>{' '}
+                      <span className="mono muted">{i.id}</span>
+                      <br />
+                      <span className="muted">
+                        责任方 {i.owner} ・ 状态 {i.status_at_sign} ・ v{i.version_at_sign}
+                      </span>
+                    </li>
+                  ))}
+                  {detail.comparison.changed.map((i) => (
+                    <li key={i.id} data-testid={`cmp-changed-${i.id}`}>
+                      <span className="badge kind-supplement">变更</span>{' '}
+                      <strong>{i.title}</strong> <span className="mono muted">{i.id}</span>
+                      <br />
+                      {i.diff &&
+                        Object.entries(i.diff).map(([field, d]) => (
+                          <span key={field} className="diff-line">
+                            <code>{field}</code>：<s>{String(d.from)}</s> →{' '}
+                            <strong>{String(d.to)}</strong>
+                          </span>
+                        ))}
+                    </li>
+                  ))}
+                  {detail.comparison.unchanged.map((i) => (
+                    <li key={i.id} className="muted" data-testid={`cmp-unchanged-${i.id}`}>
+                      <span className="badge">未变化</span> {i.title}{' '}
+                      <span className="mono">{i.id}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
 
           {h.status === 'signed' && (
             <>

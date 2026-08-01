@@ -24,6 +24,7 @@
 | 逐项确认幂等 | 重复确认返回首次结果（`alreadyConfirmed: true`），不产生第二条审计 |
 | 断线重试/重复提交 | `Idempotency-Key` 占位认领：并发同键严格只生效一次，其余请求重放首次响应 |
 | 并发串行化 | 所有写路径 `SELECT ... FOR UPDATE` 行锁 |
+| 补充交接包 | `parent_handoff_id` 显式关联已签收父包；签收时只快照父签收之后**新增/变化**的行动项，并保存与父快照的**逐字段差异**（`change_kind` + `diff jsonb`）；父包快照与确认记录永不被修改 |
 
 ## 目录
 
@@ -90,8 +91,8 @@ npm run dev            # 开发启动（:5173，/api 代理到 :3001）
 | GET | `/api/incidents/:id` | 事件 + 行动项 + 交接包列表 |
 | GET | `/api/incidents/:id/timeline` | 时间线（evidence/supplement/audit） |
 | PATCH | `/api/action-items/:id` | 更新行动项（`expectedVersion` 必填，409 字段级冲突） |
-| POST | `/api/incidents/:id/handoffs` | 创建草稿交接包 |
-| GET | `/api/handoffs/:id` | 详情：草稿显示实时项；已签收显示锁定快照 + 补充事件 |
+| POST | `/api/incidents/:id/handoffs` | 创建草稿交接包（可选 `parentHandoffId` 创建补充包，父包须已签收） |
+| GET | `/api/handoffs/:id` | 详情：草稿显示实时项；已签收显示锁定快照 + 补充事件；补充包附带 `parent` 与 `comparison`（added / changed[逐字段 diff] / unchanged / parentItems） |
 | PATCH | `/api/handoffs/:id` | 仅草稿可改；已签收 409 `HANDOFF_LOCKED` |
 | POST | `/api/handoffs/:id/sign` | 签收：快照 + 状态 + 审计同事务原子产生 |
 | POST | `/api/handoffs/:id/items/:itemId/confirm` | 逐项确认（幂等） |
@@ -103,13 +104,15 @@ npm run dev            # 开发启动（:5173，/api 代理到 :3001）
 ## 五、测试
 
 ```bash
-cd server && npm test    # 17 个用例
+cd server && npm test    # 23 个用例
 ```
 
 覆盖：种子数据完整性、版本递增、**旧版本 409 字段级冲突**、非法状态、签收原子性
 （含失败回滚反向验证）、已签收不可变/不可重复签收、确认幂等、签收不自动关闭、
 签收后更新自动生成补充事件、幂等键重放与并发同键、两客户端同版本并发一成一败、
-双签收/双确认只记一次、签收后更新×确认交叉竞争。
+双签收/双确认只记一次、签收后更新×确认交叉竞争、**补充交接包**（父包校验、
+同键创建只产生一个、差异快照内容与逐字段 diff、父包行/快照/确认记录不变、
+旧版本签收 409 零快照、并发签收一成一败一组快照一条审计）。
 
-浏览器侧已验证：双会话逐项确认、跨会话轮询收敛、字段级冲突 UI、焦点恢复、
-键盘可达（原生 button/input + aria-live 播报）。
+浏览器侧已验证：双会话逐项确认、跨会话轮询收敛、字段级冲突 UI、冲突刷新后焦点恢复原编辑项、
+补充包并排对比视图（父快照 vs 新增/变更/未变化）、键盘可达（原生 button/input + aria-live 播报）。

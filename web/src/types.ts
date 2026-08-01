@@ -29,6 +29,12 @@ export interface Handoff {
   created_by: string;
   created_at: string;
   signed_at: string | null;
+  parent_handoff_id: string | null;
+}
+
+export interface FieldDiff {
+  from: unknown;
+  to: unknown;
 }
 
 export interface HandoffItem {
@@ -41,6 +47,8 @@ export interface HandoffItem {
   confirmed: boolean;
   confirmed_by: string | null;
   confirmed_at: string | null;
+  change_kind?: 'snapshot' | 'added' | 'changed';
+  diff?: Record<string, FieldDiff> | null;
 }
 
 export interface TimelineEvent {
@@ -61,10 +69,19 @@ export interface Overview {
   handoffs: Handoff[];
 }
 
+export interface HandoffComparison {
+  added: HandoffItem[];
+  changed: HandoffItem[];
+  unchanged: HandoffItem[];
+  parentItems: HandoffItem[];
+}
+
 export interface HandoffDetail {
   handoff: Handoff;
   items: HandoffItem[];
   supplements: TimelineEvent[];
+  parent: Handoff | null;
+  comparison: HandoffComparison | null;
 }
 
 export interface FieldConflict {

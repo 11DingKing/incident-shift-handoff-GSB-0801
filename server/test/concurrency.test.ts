@@ -55,7 +55,7 @@ test('并发：两人同时签收同一交接包，只有一份快照与一条�
     'SELECT * FROM handoff_items WHERE handoff_id = $1',
     [handoffId],
   );
-  assert.equal(items.rowCount, 2); // 两个行动项各一份快照
+  assert.equal(items.rowCount, 3); // 三个行动项各一份快照
   const audits = await ctx.pool.query(
     `SELECT * FROM timeline_events WHERE handoff_id = $1 AND kind = 'audit'`,
     [handoffId],

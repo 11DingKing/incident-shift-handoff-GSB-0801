@@ -24,9 +24,13 @@ test('种子数据：事件、行动项、时间线均有稳定 ID、责任方�
   assert.equal(res.statusCode, 200);
   const body = res.json();
   assert.equal(body.incident.id, INCIDENT);
-  assert.equal(body.actionItems.length, 2);
+  assert.equal(body.actionItems.length, 3);
   const titles = body.actionItems.map((i: { title: string }) => i.title);
-  assert.deepEqual(titles, ['复核东侧绕行路线', '确认临时搭建物撤离结果']);
+  assert.deepEqual(titles, [
+    '复核东侧绕行路线',
+    '确认临时搭建物撤离结果',
+    '复核恢复通行后的现场警戒',
+  ]);
   for (const item of body.actionItems) {
     assert.ok(item.id && item.owner && item.occurred_at);
     assert.equal(item.status, 'open');
@@ -38,10 +42,10 @@ test('种子数据：事件、行动项、时间线均有稳定 ID、责任方�
     url: `/api/incidents/${INCIDENT}/timeline`,
   });
   const events = tl.json().events;
-  assert.equal(events.length, 2);
+  assert.equal(events.length, 3);
   assert.deepEqual(
     events.map((e: { title: string }) => e.title),
-    ['主路封闭', '现场证据入库'],
+    ['主路封闭', '现场证据入库', '东侧绕行路线重新开放'],
   );
   for (const e of events) {
     assert.ok(e.id && e.owner && e.occurred_at);
@@ -94,14 +98,14 @@ test('签收：快照 + 状态 + 审计事件原子产生；未确认项不自�
   const res = await signHandoff(ctx.app, handoffId);
   assert.equal(res.statusCode, 200);
   assert.equal(res.json().handoff.status, 'signed');
-  assert.equal(res.json().snapshotCount, 2);
+  assert.equal(res.json().snapshotCount, 3);
 
   const detail = await ctx.app.inject({
     method: 'GET',
     url: `/api/handoffs/${handoffId}`,
   });
   const { items } = detail.json();
-  assert.equal(items.length, 2);
+  assert.equal(items.length, 3);
   for (const item of items) {
     assert.equal(item.confirmed, false);
     assert.equal(item.status_at_sign, item.id === ITEM_ROUTE ? 'in_progress' : 'open');
