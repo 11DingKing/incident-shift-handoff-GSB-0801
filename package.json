@@ -1,0 +1,23 @@
+{
+  "name": "incident-shift-handoff",
+  "version": "1.0.0",
+  "private": true,
+  "description": "应急事件跨班次交接系统（事件 / 行动项 / 证据时间线 / 交接快照 / 逐项确认）",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=backend && npm run build --workspace=frontend",
+    "typecheck": "npm run typecheck --workspace=backend && npm run typecheck --workspace=frontend",
+    "test": "npm run test --workspace=backend && npm run test --workspace=frontend",
+    "test:browser": "npm run test:browser --workspace=frontend",
+    "migrate": "npm run migrate --workspace=backend",
+    "seed": "npm run seed --workspace=backend",
+    "dev": "npm run dev --workspace=backend & npm run dev --workspace=frontend",
+    "start": "npm run start --workspace=backend"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
