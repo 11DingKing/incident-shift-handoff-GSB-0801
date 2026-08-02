@@ -12,14 +12,17 @@ import type {
   AuditEvent,
   SupplementalDiff,
   ChangedActionItem,
+  FieldConflict,
 } from "../types.js";
 import {
   NotFoundError,
   ValidationError,
   ImmutableResourceError,
+  OptimisticLockError,
 } from "../types.js";
 import * as incidentRepo from "../repositories/incidentRepo.js";
 import * as handoffRepo from "../repositories/handoffRepo.js";
+import * as actionItemRepo from "../repositories/actionItemRepo.js";
 import * as auditRepo from "../repositories/auditRepo.js";
 import { ids } from "../ids.js";
 import { eventBus } from "./eventBus.js";
@@ -36,6 +39,7 @@ export interface CreateHandoffInput {
 export interface HandoffDetail {
   handoff: Handoff;
   acknowledgements: Acknowledgement[];
+  supplemental_acknowledgements: Acknowledgement[];
   supplemental_events: SupplementalEvent[];
   supplemental_handoff: import("../types.js").SupplementalHandoff | null;
 }
@@ -148,11 +152,10 @@ export async function signHandoff(
           recorded_at: new Date().toISOString(),
           created_at: new Date().toISOString(),
         };
-        const snapshot = buildSnapshot(
-          incident,
-          actionItems,
-          [...timelineEvents, signEvent],
-        );
+        const snapshot = buildSnapshot(incident, actionItems, [
+          ...timelineEvents,
+          signEvent,
+        ]);
 
         const signed = await handoffRepo.signHandoff(
           client,
@@ -528,6 +531,197 @@ export async function createSupplementalHandoff(
   });
 }
 
+export interface CreateSupplementalAckInput {
+  supplemental_handoff_id: string;
+  item_type: ItemType;
+  item_id: string;
+  acknowledged_by: string;
+  note?: string;
+  expected_version?: number;
+}
+
+const ACK_DIFF_FIELDS = [
+  "title",
+  "detail",
+  "status",
+  "responsible_party",
+  "occurred_at",
+] as const;
+
+function itemInSupplementalDiff(
+  diff: SupplementalDiff,
+  itemType: ItemType,
+  itemId: string,
+): boolean {
+  if (itemType === "action_item") {
+    return (
+      diff.added_action_items.some((a) => a.id === itemId) ||
+      diff.changed_action_items.some((c) => c.id === itemId)
+    );
+  }
+  return diff.added_timeline_events.some((t) => t.id === itemId);
+}
+
+function buildAckConflicts(
+  base: ActionItem | null,
+  current: ActionItem,
+): FieldConflict[] {
+  const conflicts: FieldConflict[] = [];
+  for (const field of ACK_DIFF_FIELDS) {
+    const baseValue = base
+      ? (base as unknown as Record<string, unknown>)[field]
+      : null;
+    const currentValue = (current as unknown as Record<string, unknown>)[field];
+    if (!base || JSON.stringify(baseValue) !== JSON.stringify(currentValue)) {
+      conflicts.push({
+        field,
+        base: baseValue,
+        current: currentValue,
+        attempted: baseValue,
+      });
+    }
+  }
+  return conflicts;
+}
+
+export async function createSupplementalAcknowledgement(
+  input: CreateSupplementalAckInput,
+  idempotencyKey?: string,
+): Promise<{ acknowledgement: Acknowledgement; replayed: boolean }> {
+  if (
+    !input.supplemental_handoff_id ||
+    !input.item_type ||
+    !input.item_id ||
+    !input.acknowledged_by
+  ) {
+    throw new ValidationError("缺少必需的补充包确认字段");
+  }
+  return withTransaction(async (client) => {
+    const sh = await handoffRepo.getSupplementalHandoffById(
+      client,
+      input.supplemental_handoff_id,
+    );
+    if (!sh) {
+      throw new NotFoundError(
+        `补充交接包 ${input.supplemental_handoff_id} 不存在`,
+      );
+    }
+
+    if (!itemInSupplementalDiff(sh.diff, input.item_type, input.item_id)) {
+      throw new NotFoundError(
+        `项目 ${input.item_id} 不在补充交接包 ${sh.id} 的差异清单中`,
+      );
+    }
+
+    let ackedVersion: number | null = null;
+
+    if (input.item_type === "action_item") {
+      const current = await actionItemRepo.getActionItemForUpdate(
+        client,
+        input.item_id,
+      );
+      if (!current) {
+        throw new NotFoundError(`行动项 ${input.item_id} 不存在`);
+      }
+      ackedVersion = current.version;
+
+      if (
+        input.expected_version !== undefined &&
+        input.expected_version !== current.version
+      ) {
+        const base = await actionItemRepo.getRevision(
+          client,
+          input.item_id,
+          input.expected_version,
+        );
+        const conflicts = buildAckConflicts(base, current);
+        throw new OptimisticLockError(
+          `行动项 ${input.item_id} 版本冲突：当前版本 ${current.version}，确认基于版本 ${input.expected_version}`,
+          current.version,
+          conflicts,
+          current,
+        );
+      }
+    } else {
+      const { rows } = await client.query(
+        `SELECT 1 FROM timeline_events WHERE id = $1`,
+        [input.item_id],
+      );
+      if (rows.length === 0) {
+        throw new NotFoundError(`时间线事件 ${input.item_id} 不存在`);
+      }
+    }
+
+    const existing = await handoffRepo.findAcknowledgement(
+      client,
+      sh.parent_handoff_id,
+      input.item_type,
+      input.item_id,
+      sh.id,
+    );
+    if (existing) {
+      return { acknowledgement: existing, replayed: true };
+    }
+
+    const { result, replayed: idemReplayed } = await withIdempotency(
+      client,
+      idempotencyKey,
+      `supplemental_ack:${sh.id}:${input.item_type}:${input.item_id}`,
+      async () => {
+        const inserted = await handoffRepo.createAcknowledgement(client, {
+          id: ids.acknowledgement(),
+          handoff_id: sh.parent_handoff_id,
+          item_type: input.item_type,
+          item_id: input.item_id,
+          acknowledged_by: input.acknowledged_by,
+          note: input.note ?? "",
+          supplemental_handoff_id: sh.id,
+          acked_version: ackedVersion,
+        });
+        if (!inserted) {
+          const winner = await handoffRepo.findAcknowledgement(
+            client,
+            sh.parent_handoff_id,
+            input.item_type,
+            input.item_id,
+            sh.id,
+          );
+          return { ack: winner!, won: false };
+        }
+        await auditRepo.createAuditEvent(client, {
+          incident_id: sh.incident_id,
+          handoff_id: sh.parent_handoff_id,
+          event_type: "supplemental_acknowledgement.created",
+          actor: input.acknowledged_by,
+          payload: {
+            acknowledgement_id: inserted.id,
+            supplemental_handoff_id: sh.id,
+            item_type: input.item_type,
+            item_id: input.item_id,
+            acked_version: ackedVersion,
+          },
+        });
+        eventBus.publish({
+          type: "supplemental_acknowledgement.created",
+          incident_id: sh.incident_id,
+          payload: {
+            supplemental_handoff_id: sh.id,
+            parent_handoff_id: sh.parent_handoff_id,
+            item_type: input.item_type,
+            item_id: input.item_id,
+          },
+        });
+        return { ack: inserted, won: true };
+      },
+    );
+
+    return {
+      acknowledgement: result.ack,
+      replayed: idemReplayed || !result.won,
+    };
+  });
+}
+
 export async function getHandoffDetail(
   handoffId: string,
 ): Promise<HandoffDetail> {
@@ -537,9 +731,15 @@ export async function getHandoffDetail(
     if (!handoff) {
       throw new NotFoundError(`交接包 ${handoffId} 不存在`);
     }
-    const acknowledgements = await handoffRepo.listAcknowledgements(
+    const allAcknowledgements = await handoffRepo.listAcknowledgements(
       client,
       handoffId,
+    );
+    const acknowledgements = allAcknowledgements.filter(
+      (a) => a.supplemental_handoff_id === null,
+    );
+    const supplemental_acknowledgements = allAcknowledgements.filter(
+      (a) => a.supplemental_handoff_id !== null,
     );
     const supplemental_events = await handoffRepo.listSupplementalEvents(
       client,
@@ -555,6 +755,7 @@ export async function getHandoffDetail(
     return {
       handoff,
       acknowledgements,
+      supplemental_acknowledgements,
       supplemental_events,
       supplemental_handoff,
     };

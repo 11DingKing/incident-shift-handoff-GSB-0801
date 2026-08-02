@@ -129,6 +129,7 @@ export interface IncidentDetail {
 export interface HandoffDetail {
   handoff: Handoff;
   acknowledgements: Acknowledgement[];
+  supplemental_acknowledgements: Acknowledgement[];
   supplemental_events: SupplementalEvent[];
   supplemental_handoff: SupplementalHandoff | null;
 }

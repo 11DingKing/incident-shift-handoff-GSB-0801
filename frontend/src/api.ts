@@ -16,19 +16,23 @@ function idempotencyKey(): string {
   return `idem-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  if (!headers.has("Content-Type") && options.body) {
+async function request<T>(
+  path: string,
+  options: RequestInit & { idempotencyKey?: string } = {},
+): Promise<T> {
+  const { idempotencyKey: customKey, ...fetchOptions } = options;
+  const headers = new Headers(fetchOptions.headers);
+  if (!headers.has("Content-Type") && fetchOptions.body) {
     headers.set("Content-Type", "application/json");
   }
   if (
-    options.method &&
-    options.method !== "GET" &&
+    fetchOptions.method &&
+    fetchOptions.method !== "GET" &&
     !headers.has("Idempotency-Key")
   ) {
-    headers.set("Idempotency-Key", idempotencyKey());
+    headers.set("Idempotency-Key", customKey ?? idempotencyKey());
   }
-  const res = await fetch(path, { ...options, headers });
+  const res = await fetch(path, { ...fetchOptions, headers });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as Record<
       string,
@@ -159,6 +163,27 @@ export const api = {
       {
         method: "POST",
         body: JSON.stringify(input),
+      },
+    );
+  },
+
+  acknowledgeSupplemental(
+    supplementalHandoffId: string,
+    input: {
+      item_type: "action_item" | "timeline_event";
+      item_id: string;
+      acknowledged_by: string;
+      note?: string;
+      expected_version?: number;
+    },
+    idempotencyKey?: string,
+  ): Promise<{ acknowledgement: { id: string }; replayed: boolean }> {
+    return request(
+      `/api/supplemental-handoffs/${encodeURIComponent(supplementalHandoffId)}/acknowledgements`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+        idempotencyKey,
       },
     );
   },

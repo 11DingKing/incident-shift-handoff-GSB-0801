@@ -119,7 +119,7 @@ test.describe("补充交接包与逐字段差异", () => {
     await createAndSign(page);
     await page.getByRole("button", { name: "生成补充交接包" }).click();
     await expect(
-      page.locator(".toast", { hasText: "补充交接包已生成" })
+      page.locator(".toast", { hasText: "补充交接包已生成" }).last()
     ).toBeVisible();
     await expect(page.locator(".badge", { hasText: /^已生成 sh-/ })).toBeVisible();
 

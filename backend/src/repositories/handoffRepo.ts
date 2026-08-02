@@ -160,6 +160,17 @@ export async function createSupplementalHandoff(
   return rows[0] ?? null;
 }
 
+export async function getSupplementalHandoffById(
+  client: PoolClient,
+  id: string,
+): Promise<SupplementalHandoff | null> {
+  const { rows } = await client.query<SupplementalHandoff>(
+    `SELECT * FROM supplemental_handoffs WHERE id = $1`,
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
 export async function getSupplementalHandoffByParent(
   client: PoolClient,
   parentHandoffId: string,

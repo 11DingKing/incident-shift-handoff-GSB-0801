@@ -47,7 +47,7 @@ export function App() {
 
   const acknowledgedIds = useMemo(
     () => new Set(acks.map((a) => a.item_id)),
-    [acks]
+    [acks],
   );
 
   const signedVersions = useMemo(() => {
@@ -73,7 +73,11 @@ export function App() {
           <ActorBar actor={actor} setActor={setActor} />
         </div>
 
-        <form onSubmit={submitIncidentId} className="form-row" style={{ marginBottom: 16 }}>
+        <form
+          onSubmit={submitIncidentId}
+          className="form-row"
+          style={{ marginBottom: 16 }}
+        >
           <label htmlFor="incident-id" className="muted">
             事件 ID
           </label>
@@ -129,6 +133,7 @@ export function App() {
               <HandoffPanel
                 incidentId={data.incident.id}
                 handoffs={data.handoffs}
+                liveActionItems={data.action_items}
                 actor={actor}
                 onChanged={refetch}
               />

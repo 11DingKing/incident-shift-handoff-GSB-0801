@@ -1,10 +1,28 @@
-import type { SupplementalDiff, SnapshotData } from "../types";
+import { useLayoutEffect, useRef, useState } from "react";
+import type {
+  SupplementalDiff,
+  SnapshotData,
+  ActionItem,
+  Acknowledgement,
+  ItemType,
+  FieldConflict,
+} from "../types";
 import { formatDateTime, kindLabel, statusLabel } from "../format";
+import { ConflictAlert } from "./ConflictAlert";
+import { useToast } from "../toast";
+import { api } from "../api";
 
 interface Props {
   parentSnapshot: SnapshotData;
   diff: SupplementalDiff;
+  supplementalHandoffId: string;
+  acknowledgements: Acknowledgement[];
+  liveActionItems: ActionItem[];
+  actor: string;
+  onChanged: () => void | Promise<void>;
 }
+
+const FOCUS_STORAGE_KEY = "supplemental-ack-focus";
 
 function fieldLabel(field: string): string {
   switch (field) {
@@ -37,13 +55,138 @@ function display(v: unknown): string {
   return JSON.stringify(v);
 }
 
-export function SupplementalDiffView({ parentSnapshot, diff }: Props) {
-  const baseActionMap = new Map(
-    parentSnapshot.action_items.map((a) => [a.id, a]),
+interface AckTarget {
+  type: ItemType;
+  id: string;
+  version: number | null;
+}
+
+export function SupplementalDiffView({
+  parentSnapshot,
+  diff,
+  supplementalHandoffId,
+  acknowledgements,
+  liveActionItems,
+  actor,
+  onChanged,
+}: Props) {
+  const { notify } = useToast();
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<{
+    key: string;
+    message: string;
+    currentVersion: number;
+    conflicts: FieldConflict[];
+  } | null>(null);
+
+  const btnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const restoringRef = useRef(true);
+  const focusTargetRef = useRef<string | null>(
+    typeof sessionStorage !== "undefined"
+      ? sessionStorage.getItem(FOCUS_STORAGE_KEY)
+      : null,
   );
-  const baseTimelineIds = new Set(
-    parentSnapshot.timeline_events.map((t) => t.id),
+
+  const ackMap = new Map(
+    acknowledgements.map((a) => [`${a.item_type}:${a.item_id}`, a]),
   );
+
+  const liveVersionMap = new Map(liveActionItems.map((a) => [a.id, a.version]));
+
+  useLayoutEffect(() => {
+    if (!restoringRef.current) return;
+    const target = focusTargetRef.current;
+    if (!target) {
+      restoringRef.current = false;
+      return;
+    }
+    const el = btnRefs.current[target];
+    if (el) {
+      restoringRef.current = false;
+      el.scrollIntoView({ block: "nearest" });
+      el.focus();
+      sessionStorage.removeItem(FOCUS_STORAGE_KEY);
+    }
+  });
+
+  async function acknowledge(target: AckTarget, title: string) {
+    if (!actor) {
+      notify("请先在右上角填写当前值班人", "err");
+      return;
+    }
+    const key = `${target.type}:${target.id}`;
+    setPendingKey(key);
+    setConflict(null);
+    if (typeof sessionStorage !== "undefined") {
+      sessionStorage.setItem(FOCUS_STORAGE_KEY, key);
+    }
+    try {
+      const r = await api.acknowledgeSupplemental(supplementalHandoffId, {
+        item_type: target.type,
+        item_id: target.id,
+        acknowledged_by: actor,
+        expected_version: target.version ?? undefined,
+      });
+      notify(
+        r.replayed
+          ? `「${title}」已确认过，无需重复`
+          : `已确认补充包项「${title}」`,
+        r.replayed ? "info" : "ok",
+      );
+      await onChanged();
+      requestAnimationFrame(() => {
+        btnRefs.current[key]?.focus();
+      });
+    } catch (e) {
+      const err = e as {
+        status?: number;
+        conflict?: {
+          message: string;
+          currentVersion: number;
+          conflicts: FieldConflict[];
+        };
+      };
+      if (err.status === 409 && err.conflict) {
+        setConflict({
+          key,
+          message: err.conflict.message,
+          currentVersion: err.conflict.currentVersion,
+          conflicts: err.conflict.conflicts,
+        });
+        notify("确认版本已过期，请查看字段级当前值", "err");
+      } else {
+        notify(e instanceof Error ? e.message : "确认失败", "err");
+      }
+    } finally {
+      setPendingKey(null);
+    }
+  }
+
+  function renderAckButton(target: AckTarget, title: string) {
+    const key = `${target.type}:${target.id}`;
+    const ack = ackMap.get(key);
+    const isPending = pendingKey === key;
+    return (
+      <div className="actions" style={{ marginTop: 6 }}>
+        <button
+          ref={(el) => {
+            btnRefs.current[key] = el;
+          }}
+          className={ack ? "ghost" : "primary"}
+          onClick={() => acknowledge(target, title)}
+          disabled={isPending}
+          aria-pressed={Boolean(ack)}
+          aria-label={`确认补充包项 ${title}`}
+        >
+          {ack
+            ? `已确认（由 ${ack.acknowledged_by}${ack.acked_version ? ` · v${ack.acked_version}` : ""}）`
+            : isPending
+              ? "确认中..."
+              : "确认该项"}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="diff-grid">
@@ -70,9 +213,7 @@ export function SupplementalDiffView({ parentSnapshot, diff }: Props) {
 
       <div className="diff-col diff-changes">
         <h4>签收后差异（补充包快照）</h4>
-        <div className="muted">
-          生成于 {formatDateTime(diff.generated_at)}
-        </div>
+        <div className="muted">生成于 {formatDateTime(diff.generated_at)}</div>
 
         {diff.added_action_items.length === 0 &&
           diff.changed_action_items.length === 0 &&
@@ -83,14 +224,40 @@ export function SupplementalDiffView({ parentSnapshot, diff }: Props) {
         {diff.added_action_items.length > 0 && (
           <>
             <div className="diff-section-title">新增行动项</div>
-            {diff.added_action_items.map((a) => (
-              <div className="diff-item added" key={a.id}>
-                <div className="title">＋ {a.title}</div>
-                <div className="meta">
-                  {statusLabel(a.status)} · {a.responsible_party} · {a.id}
+            {diff.added_action_items.map((a) => {
+              const key = `action_item:${a.id}`;
+              return (
+                <div className="diff-item added" key={a.id}>
+                  <div className="title">＋ {a.title}</div>
+                  <div className="meta">
+                    {statusLabel(a.status)} · {a.responsible_party} · {a.id} ·
+                    当前 v{liveVersionMap.get(a.id) ?? a.version}
+                  </div>
+                  {conflict?.key === key && (
+                    <ConflictAlert
+                      message={conflict.message}
+                      currentVersion={conflict.currentVersion}
+                      conflicts={conflict.conflicts}
+                      onReload={async () => {
+                        setConflict(null);
+                        await onChanged();
+                        requestAnimationFrame(() => {
+                          btnRefs.current[key]?.focus();
+                        });
+                      }}
+                    />
+                  )}
+                  {renderAckButton(
+                    {
+                      type: "action_item",
+                      id: a.id,
+                      version: liveVersionMap.get(a.id) ?? a.version,
+                    },
+                    a.title,
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </>
         )}
 
@@ -98,7 +265,10 @@ export function SupplementalDiffView({ parentSnapshot, diff }: Props) {
           <>
             <div className="diff-section-title">变化行动项（逐字段）</div>
             {diff.changed_action_items.map((c) => {
-              const base = baseActionMap.get(c.id);
+              const base = parentSnapshot.action_items.find(
+                (a) => a.id === c.id,
+              );
+              const key = `action_item:${c.id}`;
               return (
                 <div className="diff-item changed" key={c.id}>
                   <div className="title">
@@ -119,8 +289,31 @@ export function SupplementalDiffView({ parentSnapshot, diff }: Props) {
                       ))}
                     </tbody>
                   </table>
-                  {base && (
-                    <div className="meta">父包原值：{statusLabel(base.status)}</div>
+                  <div className="meta">
+                    父包原值：{base ? statusLabel(base.status) : "—"} · 当前 v
+                    {liveVersionMap.get(c.id) ?? c.to_version}
+                  </div>
+                  {conflict?.key === key && (
+                    <ConflictAlert
+                      message={conflict.message}
+                      currentVersion={conflict.currentVersion}
+                      conflicts={conflict.conflicts}
+                      onReload={async () => {
+                        setConflict(null);
+                        await onChanged();
+                        requestAnimationFrame(() => {
+                          btnRefs.current[key]?.focus();
+                        });
+                      }}
+                    />
+                  )}
+                  {renderAckButton(
+                    {
+                      type: "action_item",
+                      id: c.id,
+                      version: liveVersionMap.get(c.id) ?? c.to_version,
+                    },
+                    c.title,
                   )}
                 </div>
               );
@@ -131,17 +324,35 @@ export function SupplementalDiffView({ parentSnapshot, diff }: Props) {
         {diff.added_timeline_events.length > 0 && (
           <>
             <div className="diff-section-title">新增时间线事件</div>
-            {diff.added_timeline_events.map((t) => (
-              <div className="diff-item added" key={t.id}>
-                <div className="title">
-                  ＋ {kindLabel(t.kind)}
-                  {baseTimelineIds.has(t.id) ? "" : ""}
+            {diff.added_timeline_events.map((t) => {
+              const key = `timeline_event:${t.id}`;
+              return (
+                <div className="diff-item added" key={t.id}>
+                  <div className="title">＋ {kindLabel(t.kind)}</div>
+                  <div className="meta">
+                    {t.description} · {formatDateTime(t.occurred_at)}
+                  </div>
+                  {conflict?.key === key && (
+                    <ConflictAlert
+                      message={conflict.message}
+                      currentVersion={conflict.currentVersion}
+                      conflicts={conflict.conflicts}
+                      onReload={async () => {
+                        setConflict(null);
+                        await onChanged();
+                        requestAnimationFrame(() => {
+                          btnRefs.current[key]?.focus();
+                        });
+                      }}
+                    />
+                  )}
+                  {renderAckButton(
+                    { type: "timeline_event", id: t.id, version: null },
+                    t.description,
+                  )}
                 </div>
-                <div className="meta">
-                  {t.description} · {formatDateTime(t.occurred_at)}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </>
         )}
       </div>

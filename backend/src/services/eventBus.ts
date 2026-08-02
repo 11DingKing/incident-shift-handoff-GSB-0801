@@ -8,7 +8,8 @@ export interface IncidentChangeEvent {
     | "handoff.signed"
     | "acknowledgement.created"
     | "supplemental_event.created"
-    | "supplemental_handoff.created";
+    | "supplemental_handoff.created"
+    | "supplemental_acknowledgement.created";
   incident_id: string;
   payload: Record<string, unknown>;
 }

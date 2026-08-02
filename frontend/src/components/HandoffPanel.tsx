@@ -14,6 +14,7 @@ import { SupplementalDiffView } from "./SupplementalDiffView";
 interface Props {
   incidentId: string;
   handoffs: Handoff[];
+  liveActionItems: ActionItem[];
   actor: string;
   onChanged: () => void | Promise<void>;
 }
@@ -21,12 +22,13 @@ interface Props {
 export function HandoffPanel({
   incidentId,
   handoffs,
+  liveActionItems,
   actor,
   onChanged,
 }: Props) {
   const { notify } = useToast();
   const [selectedId, setSelectedId] = useState<string | null>(
-    handoffs[0]?.id ?? null,
+    handoffs[handoffs.length - 1]?.id ?? null,
   );
   const [detail, setDetail] = useState<HandoffDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -152,6 +154,7 @@ export function HandoffPanel({
           detail={detail}
           loading={loadingDetail}
           actor={actor}
+          liveActionItems={liveActionItems}
           onChanged={async () => {
             await onChanged();
             await loadDetail(handoff.id);
@@ -167,6 +170,7 @@ interface DetailProps {
   detail: HandoffDetail | null;
   loading: boolean;
   actor: string;
+  liveActionItems: ActionItem[];
   onChanged: () => void | Promise<void>;
 }
 
@@ -175,6 +179,7 @@ function HandoffDetailView({
   detail,
   loading,
   actor,
+  liveActionItems,
   onChanged,
 }: DetailProps) {
   const { notify } = useToast();
@@ -416,6 +421,11 @@ function HandoffDetailView({
             <SupplementalDiffView
               parentSnapshot={handoff.snapshot}
               diff={detail.supplemental_handoff.diff}
+              supplementalHandoffId={detail.supplemental_handoff.id}
+              acknowledgements={detail.supplemental_acknowledgements ?? []}
+              liveActionItems={liveActionItems}
+              actor={actor}
+              onChanged={onChanged}
             />
           )}
 
