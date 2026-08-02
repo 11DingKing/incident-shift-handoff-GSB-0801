@@ -4,11 +4,14 @@ import type {
   Handoff,
   Acknowledgement,
   SupplementalEvent,
+  SupplementalHandoff,
   ItemType,
   SnapshotData,
   ActionItem,
   TimelineEvent,
   AuditEvent,
+  SupplementalDiff,
+  ChangedActionItem,
 } from "../types.js";
 import {
   NotFoundError,
@@ -39,9 +42,14 @@ export interface HandoffDetail {
 
 export async function createHandoff(
   input: CreateHandoffInput,
-  idempotencyKey?: string
+  idempotencyKey?: string,
 ): Promise<Handoff> {
-  if (!input.incident_id || !input.from_shift || !input.to_shift || !input.created_by) {
+  if (
+    !input.incident_id ||
+    !input.from_shift ||
+    !input.to_shift ||
+    !input.created_by
+  ) {
     throw new ValidationError("缺少必需的交接包字段");
   }
   return withTransaction(async (client) => {
@@ -75,7 +83,7 @@ export async function createHandoff(
           payload: { handoff_id: handoff.id },
         });
         return handoff;
-      }
+      },
     );
     return result;
   });
@@ -84,7 +92,7 @@ export async function createHandoff(
 function buildSnapshot(
   incident: NonNullable<Awaited<ReturnType<typeof incidentRepo.getIncident>>>,
   actionItems: ActionItem[],
-  timelineEvents: TimelineEvent[]
+  timelineEvents: TimelineEvent[],
 ): SnapshotData {
   return {
     incident,
@@ -97,7 +105,7 @@ function buildSnapshot(
 export async function signHandoff(
   handoffId: string,
   actor: string,
-  idempotencyKey?: string
+  idempotencyKey?: string,
 ): Promise<Handoff> {
   return withTransaction(async (client) => {
     const existing = await handoffRepo.getHandoffForUpdate(client, handoffId);
@@ -115,30 +123,19 @@ export async function signHandoff(
       async () => {
         const incident = await incidentRepo.getIncident(
           client,
-          existing.incident_id
+          existing.incident_id,
         );
         if (!incident) {
           throw new NotFoundError(`事件 ${existing.incident_id} 不存在`);
         }
         const actionItems = await incidentRepo.listActionItems(
           client,
-          existing.incident_id
+          existing.incident_id,
         );
         const timelineEvents = await incidentRepo.listTimelineEvents(
           client,
-          existing.incident_id
+          existing.incident_id,
         );
-        const snapshot = buildSnapshot(incident, actionItems, timelineEvents);
-
-        const signed = await handoffRepo.signHandoff(
-          client,
-          handoffId,
-          snapshot,
-          actor
-        );
-        if (!signed) {
-          throw new Error("签收失败：交接包状态已变更");
-        }
 
         const signEvent: TimelineEvent = {
           id: ids.timelineEvent(),
@@ -151,6 +148,22 @@ export async function signHandoff(
           recorded_at: new Date().toISOString(),
           created_at: new Date().toISOString(),
         };
+        const snapshot = buildSnapshot(
+          incident,
+          actionItems,
+          [...timelineEvents, signEvent],
+        );
+
+        const signed = await handoffRepo.signHandoff(
+          client,
+          handoffId,
+          snapshot,
+          actor,
+        );
+        if (!signed) {
+          throw new Error("签收失败：交接包状态已变更");
+        }
+
         await incidentRepo.createTimelineEvent(client, signEvent);
 
         const audit: Omit<AuditEvent, "id" | "created_at"> = {
@@ -162,7 +175,7 @@ export async function signHandoff(
             handoff_id: handoffId,
             snapshot_captured_at: snapshot.captured_at,
             action_item_count: actionItems.length,
-            timeline_event_count: timelineEvents.length,
+            timeline_event_count: timelineEvents.length + 1,
           },
         };
         await auditRepo.createAuditEvent(client, audit);
@@ -174,7 +187,7 @@ export async function signHandoff(
         });
 
         return signed;
-      }
+      },
     );
     return result;
   });
@@ -190,9 +203,14 @@ export interface CreateAckInput {
 
 export async function createAcknowledgement(
   input: CreateAckInput,
-  idempotencyKey?: string
+  idempotencyKey?: string,
 ): Promise<{ acknowledgement: Acknowledgement; replayed: boolean }> {
-  if (!input.handoff_id || !input.item_type || !input.item_id || !input.acknowledged_by) {
+  if (
+    !input.handoff_id ||
+    !input.item_type ||
+    !input.item_id ||
+    !input.acknowledged_by
+  ) {
     throw new ValidationError("缺少必需的确认字段");
   }
   return withTransaction(async (client) => {
@@ -206,7 +224,7 @@ export async function createAcknowledgement(
       input.handoff_id,
       input.item_type,
       input.item_id,
-      null
+      null,
     );
     if (existing) {
       return { acknowledgement: existing, replayed: true };
@@ -216,7 +234,7 @@ export async function createAcknowledgement(
     if (input.item_type === "action_item") {
       const { rows } = await client.query<{ version: number }>(
         `SELECT version FROM action_items WHERE id = $1`,
-        [input.item_id]
+        [input.item_id],
       );
       if (rows.length === 0) {
         throw new NotFoundError(`行动项 ${input.item_id} 不存在`);
@@ -225,7 +243,7 @@ export async function createAcknowledgement(
     } else {
       const { rows } = await client.query(
         `SELECT 1 FROM timeline_events WHERE id = $1`,
-        [input.item_id]
+        [input.item_id],
       );
       if (rows.length === 0) {
         throw new NotFoundError(`时间线事件 ${input.item_id} 不存在`);
@@ -253,7 +271,7 @@ export async function createAcknowledgement(
             input.handoff_id,
             input.item_type,
             input.item_id,
-            null
+            null,
           );
           return { ack: winner!, won: false };
         }
@@ -279,7 +297,7 @@ export async function createAcknowledgement(
           },
         });
         return { ack: inserted, won: true };
-      }
+      },
     );
     return {
       acknowledgement: result.ack,
@@ -299,7 +317,7 @@ export interface AppendSupplementalInput {
 
 export async function appendSupplementalEvent(
   input: AppendSupplementalInput,
-  idempotencyKey?: string
+  idempotencyKey?: string,
 ): Promise<SupplementalEvent> {
   return withTransaction(async (client) => {
     const handoff = await handoffRepo.getHandoff(client, input.handoff_id);
@@ -307,9 +325,7 @@ export async function appendSupplementalEvent(
       throw new NotFoundError(`交接包 ${input.handoff_id} 不存在`);
     }
     if (handoff.status !== "signed") {
-      throw new ImmutableResourceError(
-        "只能对已签收交接包追加补充事件"
-      );
+      throw new ImmutableResourceError("只能对已签收交接包追加补充事件");
     }
     const { result } = await withIdempotency(
       client,
@@ -341,14 +357,179 @@ export async function appendSupplementalEvent(
           },
         });
         return se;
-      }
+      },
     );
     return result;
   });
 }
 
+export interface CreateSupplementalHandoffInput {
+  parent_handoff_id: string;
+  actor: string;
+  summary?: string;
+}
+
+export interface CreateSupplementalHandoffResult {
+  supplemental_handoff: SupplementalHandoff;
+  created: boolean;
+}
+
+const DIFF_FIELDS = [
+  "title",
+  "detail",
+  "status",
+  "responsible_party",
+  "occurred_at",
+] as const;
+
+function computeDiff(
+  parentHandoff: Handoff,
+  currentActionItems: ActionItem[],
+  currentTimeline: TimelineEvent[],
+): SupplementalDiff {
+  const snapshot = parentHandoff.snapshot;
+  if (!snapshot) {
+    throw new ImmutableResourceError("父交接包缺少快照，无法计算差异");
+  }
+
+  const baseActionItems = new Map(snapshot.action_items.map((a) => [a.id, a]));
+  const baseTimelineIds = new Set(snapshot.timeline_events.map((t) => t.id));
+
+  const added_action_items: ActionItem[] = [];
+  const changed_action_items: ChangedActionItem[] = [];
+
+  for (const current of currentActionItems) {
+    const base = baseActionItems.get(current.id);
+    if (!base) {
+      added_action_items.push(current);
+      continue;
+    }
+    const changes: ChangedActionItem["changes"] = {};
+    for (const field of DIFF_FIELDS) {
+      const baseValue = (base as unknown as Record<string, unknown>)[field];
+      const currentValue = (current as unknown as Record<string, unknown>)[
+        field
+      ];
+      if (JSON.stringify(baseValue) !== JSON.stringify(currentValue)) {
+        changes[field] = { from: baseValue, to: currentValue };
+      }
+    }
+    if (Object.keys(changes).length > 0) {
+      changed_action_items.push({
+        id: current.id,
+        title: current.title,
+        from_version: base.version,
+        to_version: current.version,
+        changes,
+      });
+    }
+  }
+
+  const added_timeline_events = currentTimeline.filter(
+    (t) => !baseTimelineIds.has(t.id),
+  );
+
+  return {
+    parent_handoff_id: parentHandoff.id,
+    parent_signed_off_at:
+      parentHandoff.signed_off_at ?? new Date().toISOString(),
+    generated_at: new Date().toISOString(),
+    added_action_items,
+    changed_action_items,
+    added_timeline_events,
+  };
+}
+
+export async function createSupplementalHandoff(
+  input: CreateSupplementalHandoffInput,
+  idempotencyKey?: string,
+): Promise<CreateSupplementalHandoffResult> {
+  return withTransaction(async (client) => {
+    const parent = await handoffRepo.getHandoffForUpdate(
+      client,
+      input.parent_handoff_id,
+    );
+    if (!parent) {
+      throw new NotFoundError(`交接包 ${input.parent_handoff_id} 不存在`);
+    }
+    if (parent.status !== "signed") {
+      throw new ImmutableResourceError("只能对已签收交接包创建补充交接包");
+    }
+
+    const existing = await handoffRepo.getSupplementalHandoffByParent(
+      client,
+      parent.id,
+    );
+    if (existing) {
+      return { supplemental_handoff: existing, created: false };
+    }
+
+    const { result, replayed } = await withIdempotency(
+      client,
+      idempotencyKey,
+      `supplemental_handoff:${parent.id}`,
+      async () => {
+        const [actionItems, timelineEvents] = await Promise.all([
+          incidentRepo.listActionItems(client, parent.incident_id),
+          incidentRepo.listTimelineEvents(client, parent.incident_id),
+        ]);
+        const diff = computeDiff(parent, actionItems, timelineEvents);
+
+        const created = await handoffRepo.createSupplementalHandoff(client, {
+          id: ids.supplementalHandoff(),
+          incident_id: parent.incident_id,
+          parent_handoff_id: parent.id,
+          from_shift: parent.to_shift,
+          to_shift: parent.from_shift,
+          summary: input.summary ?? "签收后变化补充交接",
+          diff,
+          created_by: input.actor,
+        });
+
+        if (!created) {
+          const winner = await handoffRepo.getSupplementalHandoffByParent(
+            client,
+            parent.id,
+          );
+          return { supplemental_handoff: winner!, created: false };
+        }
+
+        await auditRepo.createAuditEvent(client, {
+          incident_id: parent.incident_id,
+          handoff_id: parent.id,
+          event_type: "supplemental_handoff.created",
+          actor: input.actor,
+          payload: {
+            supplemental_handoff_id: created.id,
+            parent_handoff_id: parent.id,
+            added_action_item_count: diff.added_action_items.length,
+            changed_action_item_count: diff.changed_action_items.length,
+            added_timeline_event_count: diff.added_timeline_events.length,
+          },
+        });
+
+        eventBus.publish({
+          type: "supplemental_handoff.created",
+          incident_id: parent.incident_id,
+          payload: {
+            supplemental_handoff_id: created.id,
+            parent_handoff_id: parent.id,
+          },
+        });
+
+        return { supplemental_handoff: created, created: true };
+      },
+    );
+
+    return {
+      supplemental_handoff: result.supplemental_handoff,
+      created: result.created && !replayed,
+    };
+  });
+}
+
 export async function getHandoffDetail(
-  handoffId: string
+  handoffId: string,
 ): Promise<HandoffDetail> {
   const client = await pool.connect();
   try {
@@ -358,15 +539,15 @@ export async function getHandoffDetail(
     }
     const acknowledgements = await handoffRepo.listAcknowledgements(
       client,
-      handoffId
+      handoffId,
     );
     const supplemental_events = await handoffRepo.listSupplementalEvents(
       client,
-      handoffId
+      handoffId,
     );
     const supplementalHandoffs = await handoffRepo.listSupplementalHandoffs(
       client,
-      handoff.incident_id
+      handoff.incident_id,
     );
     const supplemental_handoff =
       supplementalHandoffs.find((s) => s.parent_handoff_id === handoffId) ??

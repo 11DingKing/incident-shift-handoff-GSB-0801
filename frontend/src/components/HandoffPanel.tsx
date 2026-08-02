@@ -9,6 +9,7 @@ import type {
 } from "../types";
 import { formatDateTime, kindLabel, statusLabel } from "../format";
 import { useToast } from "../toast";
+import { SupplementalDiffView } from "./SupplementalDiffView";
 
 interface Props {
   incidentId: string;
@@ -17,10 +18,15 @@ interface Props {
   onChanged: () => void | Promise<void>;
 }
 
-export function HandoffPanel({ incidentId, handoffs, actor, onChanged }: Props) {
+export function HandoffPanel({
+  incidentId,
+  handoffs,
+  actor,
+  onChanged,
+}: Props) {
   const { notify } = useToast();
   const [selectedId, setSelectedId] = useState<string | null>(
-    handoffs[0]?.id ?? null
+    handoffs[0]?.id ?? null,
   );
   const [detail, setDetail] = useState<HandoffDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -29,17 +35,20 @@ export function HandoffPanel({ incidentId, handoffs, actor, onChanged }: Props) 
   const [summary, setSummary] = useState("");
   const [creating, setCreating] = useState(false);
 
-  const loadDetail = useCallback(async (id: string) => {
-    setLoadingDetail(true);
-    try {
-      const d = await api.getHandoff(id);
-      setDetail(d);
-    } catch (e) {
-      notify(e instanceof Error ? e.message : "加载交接包失败", "err");
-    } finally {
-      setLoadingDetail(false);
-    }
-  }, [notify]);
+  const loadDetail = useCallback(
+    async (id: string) => {
+      setLoadingDetail(true);
+      try {
+        const d = await api.getHandoff(id);
+        setDetail(d);
+      } catch (e) {
+        notify(e instanceof Error ? e.message : "加载交接包失败", "err");
+      } finally {
+        setLoadingDetail(false);
+      }
+    },
+    [notify],
+  );
 
   useEffect(() => {
     if (selectedId) void loadDetail(selectedId);
@@ -120,9 +129,7 @@ export function HandoffPanel({ incidentId, handoffs, actor, onChanged }: Props) 
       </form>
 
       <div className="form-row" role="tablist" aria-label="交接包列表">
-        {handoffs.length === 0 && (
-          <span className="muted">暂无交接包</span>
-        )}
+        {handoffs.length === 0 && <span className="muted">暂无交接包</span>}
         {handoffs.map((h) => (
           <button
             key={h.id}
@@ -176,10 +183,14 @@ function HandoffDetailView({
   const [seDesc, setSeDesc] = useState("");
   const [seResp, setSeResp] = useState("");
   const [seSubmitting, setSeSubmitting] = useState(false);
+  const [generatingSh, setGeneratingSh] = useState(false);
   const confirmBtnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   const ackMap = new Map(
-    (detail?.acknowledgements ?? []).map((a) => [`${a.item_type}:${a.item_id}`, a])
+    (detail?.acknowledgements ?? []).map((a) => [
+      `${a.item_type}:${a.item_id}`,
+      a,
+    ]),
   );
 
   const actionItems: ActionItem[] = handoff.snapshot
@@ -206,7 +217,11 @@ function HandoffDetailView({
     }
   }
 
-  async function acknowledge(itemType: ItemType, itemId: string, title: string) {
+  async function acknowledge(
+    itemType: ItemType,
+    itemId: string,
+    title: string,
+  ) {
     if (!actor) {
       notify("请先在右上角填写当前值班人", "err");
       return;
@@ -219,7 +234,7 @@ function HandoffDetailView({
       });
       notify(
         r.replayed ? `「${title}」已确认过，无需重复` : `已确认「${title}」`,
-        r.replayed ? "info" : "ok"
+        r.replayed ? "info" : "ok",
       );
       await onChanged();
       requestAnimationFrame(() => {
@@ -259,6 +274,26 @@ function HandoffDetailView({
     }
   }
 
+  async function generateSupplemental() {
+    if (!actor) {
+      notify("请先在右上角填写当前值班人", "err");
+      return;
+    }
+    setGeneratingSh(true);
+    try {
+      const sh = await api.createSupplementalHandoff(handoff.id, actor);
+      notify(
+        `补充交接包已生成：新增行动项 ${sh.diff.added_action_items.length} / 变化 ${sh.diff.changed_action_items.length} / 新增时间线 ${sh.diff.added_timeline_events.length}`,
+        "ok",
+      );
+      await onChanged();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "生成失败", "err");
+    } finally {
+      setGeneratingSh(false);
+    }
+  }
+
   const allItems = [
     ...actionItems.map((a) => ({
       key: `action_item:${a.id}` as const,
@@ -293,17 +328,11 @@ function HandoffDetailView({
       <div style={{ marginBottom: 8 }}>
         <strong>{handoff.from_shift}</strong> →{" "}
         <strong>{handoff.to_shift}</strong>
-        {handoff.summary && (
-          <span className="muted"> · {handoff.summary}</span>
-        )}
+        {handoff.summary && <span className="muted"> · {handoff.summary}</span>}
       </div>
 
       {handoff.status === "draft" && (
-        <button
-          className="primary"
-          onClick={sign}
-          disabled={signing}
-        >
+        <button className="primary" onClick={sign} disabled={signing}>
           {signing ? "签收中..." : "签收并固化快照"}
         </button>
       )}
@@ -362,6 +391,34 @@ function HandoffDetailView({
 
       {handoff.status === "signed" && (
         <>
+          <h3>
+            补充交接包
+            {detail?.supplemental_handoff && (
+              <span className="badge signed" style={{ marginLeft: 8 }}>
+                已生成 {detail.supplemental_handoff.id}
+              </span>
+            )}
+          </h3>
+          <button
+            className="primary"
+            onClick={generateSupplemental}
+            disabled={generatingSh}
+            aria-label="生成补充交接包"
+          >
+            {generatingSh
+              ? "生成中..."
+              : detail?.supplemental_handoff
+                ? "重新获取补充交接包（幂等）"
+                : "生成补充交接包（快照签收后变化）"}
+          </button>
+
+          {handoff.snapshot && detail?.supplemental_handoff && (
+            <SupplementalDiffView
+              parentSnapshot={handoff.snapshot}
+              diff={detail.supplemental_handoff.diff}
+            />
+          )}
+
           <h3>签收后补充事件</h3>
           {(detail?.supplemental_events ?? []).length === 0 && (
             <div className="muted">暂无补充事件。</div>
@@ -400,11 +457,7 @@ function HandoffDetailView({
               placeholder="责任方"
               aria-label="补充事件责任方"
             />
-            <button
-              type="submit"
-              disabled={seSubmitting}
-              className="primary"
-            >
+            <button type="submit" disabled={seSubmitting} className="primary">
               追加
             </button>
           </form>

@@ -23,6 +23,7 @@ function renderList(onChanged = vi.fn()) {
   return render(
     <ToastProvider>
       <ActionItemList
+        incidentId="inc-1"
         items={[item]}
         actor="接班人"
         acknowledgedIds={new Set()}

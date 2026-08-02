@@ -6,6 +6,7 @@ import { ConflictAlert } from "./ConflictAlert";
 import { useToast } from "../toast";
 
 interface Props {
+  incidentId: string;
   items: ActionItem[];
   actor: string;
   acknowledgedIds: Set<string>;
@@ -16,6 +17,7 @@ interface Props {
 const STATUSES: ActionItemStatus[] = ["open", "in_progress", "blocked", "done"];
 
 export function ActionItemList({
+  incidentId,
   items,
   actor,
   acknowledgedIds,
@@ -31,6 +33,50 @@ export function ActionItemList({
     conflicts: { field: string; base: unknown; current: unknown; attempted: unknown }[];
   } | null>(null);
   const selectRefs = useRef<Record<string, HTMLSelectElement | null>>({});
+
+  const [newTitle, setNewTitle] = useState("");
+  const [newResponsible, setNewResponsible] = useState("");
+  const [newId, setNewId] = useState("");
+  const [creating, setCreating] = useState(false);
+  const titleRef = useRef<HTMLInputElement>(null);
+
+  async function createItem(e: React.FormEvent) {
+    e.preventDefault();
+    if (!actor) {
+      notify("请先在右上角填写当前值班人", "err");
+      return;
+    }
+    if (!newTitle.trim() || !newResponsible.trim()) {
+      notify("请填写标题与责任方", "err");
+      return;
+    }
+    setCreating(true);
+    try {
+      const res = await api.createActionItem(incidentId, {
+        id: newId.trim() || undefined,
+        title: newTitle.trim(),
+        responsible_party: newResponsible.trim(),
+        status: "open",
+        actor,
+      });
+      notify(
+        res.replayed
+          ? `行动项「${res.action_item.title}」已存在，幂等返回`
+          : `已新增行动项「${res.action_item.title}」`,
+        res.replayed ? "info" : "ok",
+      );
+      setNewTitle("");
+      setNewResponsible("");
+      setNewId("");
+      await onChanged();
+      titleRef.current?.focus();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "新增失败", "err");
+    } finally {
+      setCreating(false);
+    }
+  }
+
 
   async function changeStatus(item: ActionItem, next: ActionItemStatus) {
     if (next === item.status) return;
@@ -137,6 +183,33 @@ export function ActionItemList({
           </div>
         );
       })}
+
+      <h3>新增行动项</h3>
+      <form className="create-form" onSubmit={createItem}>
+        <input
+          ref={titleRef}
+          value={newTitle}
+          onChange={(e) => setNewTitle(e.target.value)}
+          placeholder="行动项标题"
+          className="wide"
+          aria-label="新行动项标题"
+        />
+        <input
+          value={newResponsible}
+          onChange={(e) => setNewResponsible(e.target.value)}
+          placeholder="责任方"
+          aria-label="新行动项责任方"
+        />
+        <input
+          value={newId}
+          onChange={(e) => setNewId(e.target.value)}
+          placeholder="稳定 ID（可选）"
+          aria-label="新行动项稳定 ID"
+        />
+        <button type="submit" disabled={creating} className="primary">
+          新增
+        </button>
+      </form>
     </div>
   );
 }

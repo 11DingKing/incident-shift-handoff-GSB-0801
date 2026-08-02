@@ -5,6 +5,7 @@ const createSchema = {
   type: "object",
   required: ["kind", "description", "responsible_party", "actor"],
   properties: {
+    id: { type: "string", minLength: 1 },
     kind: { type: "string", minLength: 1 },
     description: { type: "string", minLength: 1 },
     responsible_party: { type: "string", minLength: 1 },
@@ -22,6 +23,7 @@ export const timelineRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const { id } = request.params as { id: string };
       const body = request.body as {
+        id?: string;
         kind: string;
         description: string;
         responsible_party: string;
@@ -34,6 +36,7 @@ export const timelineRoutes: FastifyPluginAsync = async (app) => {
       ] as string | undefined;
       const event = await createTimelineEvent(
         {
+          id: body.id,
           incident_id: id,
           kind: body.kind,
           description: body.description,

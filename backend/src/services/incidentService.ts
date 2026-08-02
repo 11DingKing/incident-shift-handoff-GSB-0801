@@ -22,7 +22,7 @@ export interface IncidentDetail {
 }
 
 export async function getIncidentDetail(
-  incidentId: string
+  incidentId: string,
 ): Promise<IncidentDetail> {
   const client = await pool.connect();
   try {
@@ -30,13 +30,10 @@ export async function getIncidentDetail(
     if (!incident) {
       throw new NotFoundError(`事件 ${incidentId} 不存在`);
     }
-    const action_items = await incidentRepo.listActionItems(
-      client,
-      incidentId
-    );
+    const action_items = await incidentRepo.listActionItems(client, incidentId);
     const timeline_events = await incidentRepo.listTimelineEvents(
       client,
-      incidentId
+      incidentId,
     );
     const handoffs = await incidentRepo.listHandoffs(client, incidentId);
     return { incident, action_items, timeline_events, handoffs };
@@ -46,6 +43,7 @@ export async function getIncidentDetail(
 }
 
 export interface CreateTimelineInput {
+  id?: string;
   incident_id: string;
   kind: string;
   description: string;
@@ -55,9 +53,121 @@ export interface CreateTimelineInput {
   actor: string;
 }
 
+export interface CreateActionItemInput {
+  id?: string;
+  incident_id: string;
+  title: string;
+  detail?: string;
+  status?: ActionItem["status"];
+  responsible_party: string;
+  occurred_at?: string;
+  actor: string;
+}
+
+export async function createActionItem(
+  input: CreateActionItemInput,
+  idempotencyKey?: string,
+): Promise<{ action_item: ActionItem; replayed: boolean }> {
+  if (!input.title || !input.responsible_party) {
+    throw new ValidationError("缺少行动项必需字段");
+  }
+  const status = input.status ?? "open";
+  if (!["open", "in_progress", "blocked", "done"].includes(status)) {
+    throw new ValidationError("非法的行动项状态");
+  }
+  const occurredAt = input.occurred_at
+    ? new Date(input.occurred_at).toISOString()
+    : new Date().toISOString();
+
+  return withTransaction(async (client) => {
+    const incident = await incidentRepo.getIncident(client, input.incident_id);
+    if (!incident) {
+      throw new NotFoundError(`事件 ${input.incident_id} 不存在`);
+    }
+
+    const { result, replayed: idemReplayed } = await withIdempotency(
+      client,
+      idempotencyKey,
+      `action_item:${input.incident_id}:${input.id ?? input.title}`,
+      async () => {
+        const { item, created } = await incidentRepo.createActionItem(client, {
+          id: input.id ?? ids.actionItem(),
+          incident_id: input.incident_id,
+          title: input.title,
+          detail: input.detail ?? "",
+          status,
+          responsible_party: input.responsible_party,
+          occurred_at: occurredAt,
+        });
+        if (created) {
+          await client.query(
+            `INSERT INTO action_item_revisions
+               (action_item_id, version, title, detail, status, responsible_party, occurred_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (action_item_id, version) DO NOTHING`,
+            [
+              item.id,
+              item.version,
+              item.title,
+              item.detail,
+              item.status,
+              item.responsible_party,
+              item.occurred_at,
+            ],
+          );
+
+          const { rows } = await client.query<{
+            id: string;
+            from_shift: string;
+            to_shift: string;
+          }>(
+            `SELECT id, from_shift, to_shift FROM handoffs
+             WHERE incident_id = $1 AND status = 'signed'
+             ORDER BY signed_off_at DESC, created_at DESC LIMIT 1`,
+            [input.incident_id],
+          );
+          const signed = rows[0];
+          if (signed) {
+            await handoffRepo.createSupplementalEvent(client, {
+              id: ids.supplementalEvent(),
+              incident_id: input.incident_id,
+              parent_handoff_id: signed.id,
+              kind: "action_item_added",
+              description: `新增行动项「${item.title}」（${item.status}）`,
+              responsible_party: input.responsible_party,
+              occurred_at: occurredAt,
+            });
+          }
+
+          const audit: Omit<AuditEvent, "id" | "created_at"> = {
+            incident_id: input.incident_id,
+            handoff_id: signed?.id ?? null,
+            event_type: "action_item.created",
+            actor: input.actor,
+            payload: {
+              action_item_id: item.id,
+              title: item.title,
+              supplemental: Boolean(signed),
+            },
+          };
+          await auditRepo.createAuditEvent(client, audit);
+
+          eventBus.publish({
+            type: "action_item.updated",
+            incident_id: input.incident_id,
+            payload: { action_item_id: item.id, version: item.version },
+          });
+        }
+        return { item, created };
+      },
+    );
+    return { action_item: result.item, replayed: idemReplayed || !result.created };
+  });
+}
+
 export async function createTimelineEvent(
   input: CreateTimelineInput,
-  idempotencyKey?: string
+  idempotencyKey?: string,
 ): Promise<TimelineEvent> {
   if (!input.kind || !input.description || !input.responsible_party) {
     throw new ValidationError("缺少时间线事件必需字段");
@@ -75,10 +185,12 @@ export async function createTimelineEvent(
     const { result } = await withIdempotency(
       client,
       idempotencyKey,
-      `timeline:${input.incident_id}:${input.kind}:${input.description}`,
+      input.id
+        ? `timeline:id:${input.id}`
+        : `timeline:${input.incident_id}:${input.kind}:${input.description}`,
       async () => {
         const event: TimelineEvent = {
-          id: ids.timelineEvent(),
+          id: input.id ?? ids.timelineEvent(),
           incident_id: input.incident_id,
           kind: input.kind,
           description: input.description,
@@ -98,7 +210,7 @@ export async function createTimelineEvent(
           `SELECT id, from_shift, to_shift FROM handoffs
            WHERE incident_id = $1 AND status = 'signed'
            ORDER BY signed_off_at DESC, created_at DESC LIMIT 1`,
-          [input.incident_id]
+          [input.incident_id],
         );
         const signed = rows[0];
         if (signed) {
@@ -132,16 +244,13 @@ export async function createTimelineEvent(
           payload: { timeline_event_id: event.id, kind: event.kind },
         });
         return event;
-      }
+      },
     );
     return result;
   });
 }
 
-export async function listAuditForIncident(
-  incidentId: string,
-  limit = 200
-) {
+export async function listAuditForIncident(incidentId: string, limit = 200) {
   const client = await pool.connect();
   try {
     return auditRepo.listAuditEvents(client, { incidentId, limit });

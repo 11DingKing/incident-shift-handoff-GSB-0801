@@ -41,12 +41,16 @@ export function kindLabel(kind: string): string {
   switch (kind) {
     case "road_closure":
       return "主路封闭";
+    case "road_reopened":
+      return "道路恢复通行";
     case "evidence_intake":
       return "证据入库";
     case "handoff_signed":
       return "交接签收";
     case "action_item_updated":
       return "行动项更新";
+    case "action_item_added":
+      return "行动项新增";
     case "field_report":
       return "现场报告";
     default:

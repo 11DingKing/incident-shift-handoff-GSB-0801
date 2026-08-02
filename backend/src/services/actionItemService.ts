@@ -13,7 +13,6 @@ import * as handoffRepo from "../repositories/handoffRepo.js";
 import * as auditRepo from "../repositories/auditRepo.js";
 import { ids } from "../ids.js";
 import { eventBus } from "./eventBus.js";
-import { createAuditEvent } from "../repositories/auditRepo.js";
 
 const MUTABLE_FIELDS = [
   "title",
@@ -37,53 +36,7 @@ function normalizeOccurredAt(value: string | undefined): string | undefined {
   return d.toISOString();
 }
 
-async function ensureSupplementalHandoff(
-  client: PoolClient,
-  parent: { id: string; incident_id: string; from_shift: string; to_shift: string },
-  diff: Record<string, unknown>,
-  actor: string
-): Promise<string> {
-  const existing = await handoffRepo.getSupplementalHandoffByParent(
-    client,
-    parent.id
-  );
-  if (existing) return existing.id;
-  const created = await handoffRepo.createSupplementalHandoff(client, {
-    id: ids.supplementalHandoff(),
-    incident_id: parent.incident_id,
-    parent_handoff_id: parent.id,
-    from_shift: parent.to_shift,
-    to_shift: parent.from_shift,
-    summary: "签收后追加变化",
-    diff,
-    created_by: actor,
-  });
-  if (created) {
-    await createAuditEvent(client, {
-      incident_id: parent.incident_id,
-      handoff_id: parent.id,
-      event_type: "supplemental_handoff.created",
-      actor,
-      payload: { supplemental_handoff_id: created.id },
-    });
-    eventBus.publish({
-      type: "supplemental_handoff.created",
-      incident_id: parent.incident_id,
-      payload: { supplemental_handoff_id: created.id, parent_handoff_id: parent.id },
-    });
-    return created.id;
-  }
-  const winner = await handoffRepo.getSupplementalHandoffByParent(
-    client,
-    parent.id
-  );
-  return winner!.id;
-}
-
-async function latestSignedHandoff(
-  client: PoolClient,
-  incidentId: string
-) {
+async function latestSignedHandoff(client: PoolClient, incidentId: string) {
   const { rows } = await client.query<{
     id: string;
     from_shift: string;
@@ -93,7 +46,7 @@ async function latestSignedHandoff(
      WHERE incident_id = $1 AND status = 'signed'
      ORDER BY signed_off_at DESC, created_at DESC
      LIMIT 1`,
-    [incidentId]
+    [incidentId],
   );
   return rows[0] ?? null;
 }
@@ -117,7 +70,7 @@ export interface UpdateActionItemResult {
 }
 
 export async function updateActionItem(
-  input: UpdateActionItemInput
+  input: UpdateActionItemInput,
 ): Promise<UpdateActionItemResult> {
   const { id, expectedVersion, patch, actor } = input;
 
@@ -126,7 +79,10 @@ export async function updateActionItem(
       throw new Error(`字段 ${key} 不允许修改`);
     }
   }
-  if (patch.status && !["open", "in_progress", "blocked", "done"].includes(patch.status)) {
+  if (
+    patch.status &&
+    !["open", "in_progress", "blocked", "done"].includes(patch.status)
+  ) {
     throw new Error("非法的行动项状态");
   }
   const normalizedPatch: actionItemRepo.ActionItemPatch = { ...patch };
@@ -144,14 +100,23 @@ export async function updateActionItem(
       const base = await actionItemRepo.getRevision(
         client,
         id,
-        expectedVersion
+        expectedVersion,
       );
       const conflicts: FieldConflict[] = [];
       for (const key of Object.keys(normalizedPatch) as MutableField[]) {
-        const baseValue = base ? (base as unknown as Record<string, unknown>)[key] : null;
-        const currentValue = (current as unknown as Record<string, unknown>)[key];
-        const attempted = (normalizedPatch as unknown as Record<string, unknown>)[key];
-        if (base && JSON.stringify(baseValue) !== JSON.stringify(currentValue)) {
+        const baseValue = base
+          ? (base as unknown as Record<string, unknown>)[key]
+          : null;
+        const currentValue = (current as unknown as Record<string, unknown>)[
+          key
+        ];
+        const attempted = (
+          normalizedPatch as unknown as Record<string, unknown>
+        )[key];
+        if (
+          base &&
+          JSON.stringify(baseValue) !== JSON.stringify(currentValue)
+        ) {
           conflicts.push({
             field: key,
             base: baseValue,
@@ -171,7 +136,7 @@ export async function updateActionItem(
         `行动项 ${id} 版本冲突：当前版本 ${current.version}，提交基于版本 ${expectedVersion}`,
         current.version,
         conflicts,
-        current
+        current,
       );
     }
 
@@ -180,54 +145,29 @@ export async function updateActionItem(
       client,
       id,
       expectedVersion,
-      normalizedPatch
+      normalizedPatch,
     );
     if (!updated) {
       throw new OptimisticLockError(
         `行动项 ${id} 更新失败（并发冲突）`,
         current.version,
         [],
-        current
+        current,
       );
     }
     await actionItemRepo.insertRevision(client, updated);
 
-    const changedFields = (Object.keys(normalizedPatch) as MutableField[]).filter(
+    const changedFields = (
+      Object.keys(normalizedPatch) as MutableField[]
+    ).filter(
       (f) =>
         JSON.stringify((before as unknown as Record<string, unknown>)[f]) !==
-        JSON.stringify((updated as unknown as Record<string, unknown>)[f])
+        JSON.stringify((updated as unknown as Record<string, unknown>)[f]),
     );
 
     let supplementalEventId: string | undefined;
     const signed = await latestSignedHandoff(client, current.incident_id);
     if (signed) {
-      const diff = {
-        action_item_changes: [
-          {
-            id: updated.id,
-            fields: changedFields,
-            from: Object.fromEntries(
-              changedFields.map((f) => [f, (before as unknown as Record<string, unknown>)[f]])
-            ),
-            to: Object.fromEntries(
-              changedFields.map((f) => [f, (updated as unknown as Record<string, unknown>)[f]])
-            ),
-            at: updated.updated_at,
-          },
-        ],
-        generated_at: new Date().toISOString(),
-      };
-      const shId = await ensureSupplementalHandoff(
-        client,
-        {
-          id: signed.id,
-          incident_id: current.incident_id,
-          from_shift: signed.from_shift,
-          to_shift: signed.to_shift,
-        },
-        diff,
-        actor
-      );
       const se = await handoffRepo.createSupplementalEvent(client, {
         id: ids.supplementalEvent(),
         incident_id: current.incident_id,
@@ -238,14 +178,13 @@ export async function updateActionItem(
         occurred_at: updated.updated_at,
       });
       supplementalEventId = se.id;
-      await createAuditEvent(client, {
+      await auditRepo.createAuditEvent(client, {
         incident_id: current.incident_id,
         handoff_id: signed.id,
         event_type: "supplemental_event.created",
         actor,
         payload: {
           supplemental_event_id: se.id,
-          supplemental_handoff_id: shId,
           action_item_id: updated.id,
           changed_fields: changedFields,
         },
@@ -289,7 +228,7 @@ export async function getActionItem(id: string): Promise<ActionItem | null> {
 }
 
 export async function listActionItems(
-  incidentId: string
+  incidentId: string,
 ): Promise<ActionItem[]> {
   const client = await pool.connect();
   try {

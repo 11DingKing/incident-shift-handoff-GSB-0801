@@ -11,22 +11,22 @@ export interface ActionItemPatch {
 
 export async function getActionItem(
   client: PoolClient,
-  id: string
+  id: string,
 ): Promise<ActionItem | null> {
   const { rows } = await client.query<ActionItem>(
     `SELECT * FROM action_items WHERE id = $1`,
-    [id]
+    [id],
   );
   return rows[0] ?? null;
 }
 
 export async function getActionItemForUpdate(
   client: PoolClient,
-  id: string
+  id: string,
 ): Promise<ActionItem | null> {
   const { rows } = await client.query<ActionItem>(
     `SELECT * FROM action_items WHERE id = $1 FOR UPDATE`,
-    [id]
+    [id],
   );
   return rows[0] ?? null;
 }
@@ -34,13 +34,13 @@ export async function getActionItemForUpdate(
 export async function getRevision(
   client: PoolClient,
   id: string,
-  version: number
+  version: number,
 ): Promise<ActionItem | null> {
   const { rows } = await client.query<ActionItem>(
     `SELECT action_item_id AS id, version, title, detail, status, responsible_party, occurred_at, created_at
      FROM action_item_revisions
      WHERE action_item_id = $1 AND version = $2`,
-    [id, version]
+    [id, version],
   );
   return rows[0] ?? null;
 }
@@ -49,7 +49,7 @@ export async function updateActionItem(
   client: PoolClient,
   id: string,
   expectedVersion: number,
-  patch: ActionItemPatch
+  patch: ActionItemPatch,
 ): Promise<ActionItem | null> {
   const sets: string[] = [];
   const values: unknown[] = [];
@@ -80,14 +80,14 @@ export async function updateActionItem(
      SET ${sets.join(", ")}
      WHERE id = $${idx++} AND version = $${idx++}
      RETURNING *`,
-    values
+    values,
   );
   return rows[0] ?? null;
 }
 
 export async function insertRevision(
   client: PoolClient,
-  item: ActionItem
+  item: ActionItem,
 ): Promise<void> {
   await client.query(
     `INSERT INTO action_item_revisions
@@ -102,6 +102,6 @@ export async function insertRevision(
       item.status,
       item.responsible_party,
       item.occurred_at,
-    ]
+    ],
   );
 }

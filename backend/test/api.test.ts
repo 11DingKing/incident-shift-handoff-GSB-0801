@@ -93,7 +93,12 @@ describe("应急事件交接 API", () => {
     expect(signed.status).toBe("signed");
     expect(signed.snapshot).toBeTruthy();
     expect(signed.snapshot.action_items).toHaveLength(2);
-    expect(signed.snapshot.timeline_events).toHaveLength(2);
+    expect(signed.snapshot.timeline_events).toHaveLength(3);
+    expect(
+      signed.snapshot.timeline_events.some(
+        (t: { kind: string }) => t.kind === "handoff_signed"
+      )
+    ).toBe(true);
     expect(signed.signed_off_by).toBe("接班人-李四");
 
     const timeline = await query<{ kind: string }>(

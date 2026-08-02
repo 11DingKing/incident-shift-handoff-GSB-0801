@@ -103,6 +103,7 @@ export function App() {
               <section className="panel" aria-label="行动项">
                 <h2>行动项</h2>
                 <ActionItemList
+                  incidentId={data.incident.id}
                   items={data.action_items}
                   actor={actor}
                   acknowledgedIds={acknowledgedIds}

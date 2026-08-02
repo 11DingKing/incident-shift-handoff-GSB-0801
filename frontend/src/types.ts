@@ -85,6 +85,28 @@ export interface SupplementalEvent {
   created_at: string;
 }
 
+export interface FieldChange {
+  from: unknown;
+  to: unknown;
+}
+
+export interface ChangedActionItem {
+  id: string;
+  title: string;
+  from_version: number;
+  to_version: number;
+  changes: Record<string, FieldChange>;
+}
+
+export interface SupplementalDiff {
+  parent_handoff_id: string;
+  parent_signed_off_at: string;
+  generated_at: string;
+  added_action_items: ActionItem[];
+  changed_action_items: ChangedActionItem[];
+  added_timeline_events: TimelineEvent[];
+}
+
 export interface SupplementalHandoff {
   id: string;
   incident_id: string;
@@ -92,7 +114,7 @@ export interface SupplementalHandoff {
   from_shift: string;
   to_shift: string;
   summary: string;
-  diff: Record<string, unknown>;
+  diff: SupplementalDiff;
   created_by: string;
   created_at: string;
 }

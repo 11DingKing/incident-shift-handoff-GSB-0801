@@ -9,8 +9,16 @@ import type {
 
 export async function createHandoff(
   client: PoolClient,
-  handoff: Omit<Handoff, "created_at" | "signed_off_by" | "signed_off_at" | "snapshot" | "version" | "status"> &
-    Partial<Pick<Handoff, "status" | "snapshot">>
+  handoff: Omit<
+    Handoff,
+    | "created_at"
+    | "signed_off_by"
+    | "signed_off_at"
+    | "snapshot"
+    | "version"
+    | "status"
+  > &
+    Partial<Pick<Handoff, "status" | "snapshot">>,
 ): Promise<Handoff> {
   const { rows } = await client.query<Handoff>(
     `INSERT INTO handoffs
@@ -26,29 +34,29 @@ export async function createHandoff(
       handoff.status ?? "draft",
       handoff.created_by,
       handoff.snapshot ?? null,
-    ]
+    ],
   );
   return rows[0]!;
 }
 
 export async function getHandoff(
   client: PoolClient,
-  id: string
+  id: string,
 ): Promise<Handoff | null> {
   const { rows } = await client.query<Handoff>(
     `SELECT * FROM handoffs WHERE id = $1`,
-    [id]
+    [id],
   );
   return rows[0] ?? null;
 }
 
 export async function getHandoffForUpdate(
   client: PoolClient,
-  id: string
+  id: string,
 ): Promise<Handoff | null> {
   const { rows } = await client.query<Handoff>(
     `SELECT * FROM handoffs WHERE id = $1 FOR UPDATE`,
-    [id]
+    [id],
   );
   return rows[0] ?? null;
 }
@@ -57,7 +65,7 @@ export async function signHandoff(
   client: PoolClient,
   id: string,
   snapshot: unknown,
-  signedOffBy: string
+  signedOffBy: string,
 ): Promise<Handoff | null> {
   const { rows } = await client.query<Handoff>(
     `UPDATE handoffs
@@ -68,19 +76,19 @@ export async function signHandoff(
          version = version + 1
      WHERE id = $1 AND status = 'draft'
      RETURNING *`,
-    [id, snapshot, signedOffBy]
+    [id, snapshot, signedOffBy],
   );
   return rows[0] ?? null;
 }
 
 export async function listAcknowledgements(
   client: PoolClient,
-  handoffId: string
+  handoffId: string,
 ): Promise<Acknowledgement[]> {
   const { rows } = await client.query<Acknowledgement>(
     `SELECT * FROM acknowledgements WHERE handoff_id = $1
      ORDER BY acknowledged_at ASC, id ASC`,
-    [handoffId]
+    [handoffId],
   );
   return rows;
 }
@@ -90,7 +98,7 @@ export async function findAcknowledgement(
   handoffId: string,
   itemType: ItemType,
   itemId: string,
-  supplementalHandoffId: string | null
+  supplementalHandoffId: string | null,
 ): Promise<Acknowledgement | null> {
   const { rows } = await client.query<Acknowledgement>(
     `SELECT * FROM acknowledgements
@@ -98,14 +106,14 @@ export async function findAcknowledgement(
        AND item_type = $2
        AND item_id = $3
        AND COALESCE(supplemental_handoff_id, '') = COALESCE($4, '')`,
-    [handoffId, itemType, itemId, supplementalHandoffId]
+    [handoffId, itemType, itemId, supplementalHandoffId],
   );
   return rows[0] ?? null;
 }
 
 export async function createAcknowledgement(
   client: PoolClient,
-  ack: Omit<Acknowledgement, "acknowledged_at">
+  ack: Omit<Acknowledgement, "acknowledged_at">,
 ): Promise<Acknowledgement | null> {
   const { rows } = await client.query<Acknowledgement>(
     `INSERT INTO acknowledgements
@@ -123,14 +131,14 @@ export async function createAcknowledgement(
       ack.note,
       ack.supplemental_handoff_id,
       ack.acked_version,
-    ]
+    ],
   );
   return rows[0] ?? null;
 }
 
 export async function createSupplementalHandoff(
   client: PoolClient,
-  sh: Omit<SupplementalHandoff, "created_at">
+  sh: Omit<SupplementalHandoff, "created_at">,
 ): Promise<SupplementalHandoff | null> {
   const { rows } = await client.query<SupplementalHandoff>(
     `INSERT INTO supplemental_handoffs
@@ -147,37 +155,37 @@ export async function createSupplementalHandoff(
       sh.summary,
       JSON.stringify(sh.diff),
       sh.created_by,
-    ]
+    ],
   );
   return rows[0] ?? null;
 }
 
 export async function getSupplementalHandoffByParent(
   client: PoolClient,
-  parentHandoffId: string
+  parentHandoffId: string,
 ): Promise<SupplementalHandoff | null> {
   const { rows } = await client.query<SupplementalHandoff>(
     `SELECT * FROM supplemental_handoffs WHERE parent_handoff_id = $1`,
-    [parentHandoffId]
+    [parentHandoffId],
   );
   return rows[0] ?? null;
 }
 
 export async function listSupplementalHandoffs(
   client: PoolClient,
-  incidentId: string
+  incidentId: string,
 ): Promise<SupplementalHandoff[]> {
   const { rows } = await client.query<SupplementalHandoff>(
     `SELECT * FROM supplemental_handoffs WHERE incident_id = $1
      ORDER BY created_at ASC, id ASC`,
-    [incidentId]
+    [incidentId],
   );
   return rows;
 }
 
 export async function createSupplementalEvent(
   client: PoolClient,
-  event: Omit<SupplementalEvent, "created_at">
+  event: Omit<SupplementalEvent, "created_at">,
 ): Promise<SupplementalEvent> {
   const { rows } = await client.query<SupplementalEvent>(
     `INSERT INTO supplemental_events
@@ -192,19 +200,19 @@ export async function createSupplementalEvent(
       event.description,
       event.responsible_party,
       event.occurred_at,
-    ]
+    ],
   );
   return rows[0]!;
 }
 
 export async function listSupplementalEvents(
   client: PoolClient,
-  parentHandoffId: string
+  parentHandoffId: string,
 ): Promise<SupplementalEvent[]> {
   const { rows } = await client.query<SupplementalEvent>(
     `SELECT * FROM supplemental_events WHERE parent_handoff_id = $1
      ORDER BY occurred_at ASC, created_at ASC, id ASC`,
-    [parentHandoffId]
+    [parentHandoffId],
   );
   return rows;
 }

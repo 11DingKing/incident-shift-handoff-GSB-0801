@@ -10,5 +10,6 @@ export const ids = {
   supplementalHandoff: () => compactId("sh"),
   supplementalEvent: () => compactId("se"),
   timelineEvent: () => compactId("tl"),
+  actionItem: () => compactId("act"),
   audit: () => compactId("au"),
 };

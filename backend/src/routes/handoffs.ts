@@ -4,6 +4,7 @@ import {
   signHandoff,
   getHandoffDetail,
   appendSupplementalEvent,
+  createSupplementalHandoff,
 } from "../services/handoffService.js";
 
 const createSchema = {
@@ -23,6 +24,16 @@ const signSchema = {
   required: ["actor"],
   properties: {
     actor: { type: "string", minLength: 1 },
+  },
+  additionalProperties: false,
+} as const;
+
+const supplementalHandoffSchema = {
+  type: "object",
+  required: ["actor"],
+  properties: {
+    actor: { type: "string", minLength: 1 },
+    summary: { type: "string" },
   },
   additionalProperties: false,
 } as const;
@@ -52,9 +63,9 @@ export const handoffRoutes: FastifyPluginAsync = async (app) => {
         summary: string;
         created_by: string;
       };
-      const idempotencyKey = request.headers[
-        "idempotency-key"
-      ] as string | undefined;
+      const idempotencyKey = request.headers["idempotency-key"] as
+        | string
+        | undefined;
       const handoff = await createHandoff(
         {
           incident_id: id,
@@ -63,10 +74,10 @@ export const handoffRoutes: FastifyPluginAsync = async (app) => {
           summary: body.summary,
           created_by: body.created_by,
         },
-        idempotencyKey
+        idempotencyKey,
       );
       return reply.code(201).send(handoff);
-    }
+    },
   );
 
   app.get("/handoffs/:id", async (request, reply) => {
@@ -81,12 +92,35 @@ export const handoffRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const { id } = request.params as { id: string };
       const body = request.body as { actor: string };
-      const idempotencyKey = request.headers[
-        "idempotency-key"
-      ] as string | undefined;
+      const idempotencyKey = request.headers["idempotency-key"] as
+        | string
+        | undefined;
       const handoff = await signHandoff(id, body.actor, idempotencyKey);
       return reply.send(handoff);
-    }
+    },
+  );
+
+  app.post(
+    "/handoffs/:id/supplemental-handoff",
+    { schema: { body: supplementalHandoffSchema } },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = request.body as { actor: string; summary?: string };
+      const idempotencyKey = request.headers["idempotency-key"] as
+        | string
+        | undefined;
+      const result = await createSupplementalHandoff(
+        {
+          parent_handoff_id: id,
+          actor: body.actor,
+          summary: body.summary,
+        },
+        idempotencyKey,
+      );
+      return reply
+        .code(result.created ? 201 : 200)
+        .send(result.supplemental_handoff);
+    },
   );
 
   app.post(
@@ -101,9 +135,9 @@ export const handoffRoutes: FastifyPluginAsync = async (app) => {
         occurred_at?: string;
         actor: string;
       };
-      const idempotencyKey = request.headers[
-        "idempotency-key"
-      ] as string | undefined;
+      const idempotencyKey = request.headers["idempotency-key"] as
+        | string
+        | undefined;
       const event = await appendSupplementalEvent(
         {
           handoff_id: id,
@@ -113,9 +147,9 @@ export const handoffRoutes: FastifyPluginAsync = async (app) => {
           occurred_at: body.occurred_at,
           actor: body.actor,
         },
-        idempotencyKey
+        idempotencyKey,
       );
       return reply.code(201).send(event);
-    }
+    },
   );
 };

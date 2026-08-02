@@ -23,6 +23,7 @@ export function TimelineList({
   const [kind, setKind] = useState("field_report");
   const [desc, setDesc] = useState("");
   const [responsible, setResponsible] = useState("");
+  const [stableId, setStableId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const descRef = useRef<HTMLInputElement>(null);
 
@@ -39,6 +40,7 @@ export function TimelineList({
     setSubmitting(true);
     try {
       await api.addTimeline(incidentId, {
+        id: stableId.trim() || undefined,
         kind,
         description: desc.trim(),
         responsible_party: responsible.trim(),
@@ -46,6 +48,7 @@ export function TimelineList({
       });
       setDesc("");
       setResponsible("");
+      setStableId("");
       notify("时间线事件已追加", "ok");
       await onChanged();
       descRef.current?.focus();
@@ -81,6 +84,7 @@ export function TimelineList({
           <option value="status_update">状态更新</option>
           <option value="evidence_intake">证据入库</option>
           <option value="road_closure">道路管制</option>
+          <option value="road_reopened">道路恢复通行</option>
         </select>
         <input
           ref={descRef}
@@ -95,6 +99,12 @@ export function TimelineList({
           onChange={(e) => setResponsible(e.target.value)}
           placeholder="责任方"
           aria-label="责任方"
+        />
+        <input
+          value={stableId}
+          onChange={(e) => setStableId(e.target.value)}
+          placeholder="稳定 ID（可选）"
+          aria-label="时间线稳定 ID"
         />
         <button type="submit" disabled={submitting} className="primary">
           追加
