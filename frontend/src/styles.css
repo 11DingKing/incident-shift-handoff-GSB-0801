@@ -268,3 +268,40 @@ button.danger { background: var(--err); }
 }
 .toast.err { border-left-color: var(--err); }
 .toast.ok { border-left-color: var(--ok); }
+
+.diff-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 700px) {
+  .diff-grid { grid-template-columns: 1fr; }
+}
+.diff-col {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+}
+.diff-col-parent { opacity: 0.85; }
+.diff-col-changes { border-color: var(--accent); }
+.diff-cell {
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+}
+.diff-cell.diff-added { border-left: 3px solid var(--ok); }
+.diff-cell.diff-modified { border-left: 3px solid var(--warn); }
+.diff-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.diff-old { color: var(--muted); text-decoration: line-through; }
+.diff-arrow { color: var(--accent); }
+.diff-new { color: var(--ok); font-weight: 600; }

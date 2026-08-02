@@ -115,6 +115,7 @@ export default function App() {
           <h2>交接包（快照 · 逐项确认 · 签收）</h2>
           <HandoffPanel
             api={client}
+            incidentId={INCIDENT_ID}
             handoffs={data.handoffs}
             selectedId={selectedHandoff}
             onSelect={setSelectedHandoff}

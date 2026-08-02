@@ -192,7 +192,8 @@ cd frontend && npm run build && npm run preview
 | PATCH | `/api/action-items/:id` | 更新行动项（body: `{status, expected_version, ...}`） |
 | POST | `/api/incidents/:id/timeline` | 追加时间线 |
 | POST | `/api/incidents/:id/handoffs` | 创建交接包（原子快照） |
-| GET | `/api/handoffs/:handoffId` | 交接包详情（快照、确认、补充） |
+| POST | `/api/incidents/:id/handoffs/supplementary` | 创建补充（子）交接包，仅快照新增/变化项并记录逐字段差异（幂等） |
+| GET | `/api/handoffs/:handoffId` | 交接包详情（快照、确认、补充、差异） |
 | POST | `/api/handoffs/:handoffId/items/:actionItemId/acknowledge` | 逐项确认（幂等） |
 | POST | `/api/handoffs/:handoffId/acknowledge` | 包级签收（幂等，原子翻转状态） |
 
@@ -215,4 +216,5 @@ cd frontend && npm run build && npm run preview
 - **原子快照**：`createHandoff` 在单个事务中插入 `handoffs`、`handoff_items`（复制当前行动项状态与 `snapshot_version`）、`handoff_timeline` 和 `audit_events`。
 - **幂等确认**：`handoff_acknowledgments` 上有 `(handoff_id, action_item_id, confirmed_by)` 唯一约束，以及针对包级签收（`action_item_id IS NULL`）的部分唯一索引，保证重复/并发提交只产生一行；包状态翻转用 `WHERE status='pending'` 守卫，只 +1 一次。
 - **不可变快照 + 补充事件**：签收后更新行动项或追加时间线会写入 `supplementary_events` 关联原 `handoff_id`，`handoff_items` 中的快照状态永不改变。
+- **补充交接包（子包）**：签收后如需把新增/变化正式交接给下一班，可创建带 `parent_handoff_id` 的补充包（`handoff_kind='supplementary'`）。它只快照父包签收后的新增行动项/时间线和变化字段，并在 `handoff_diffs` 中保存逐字段差异（`added`/`modified` + `old_value`/`new_value`）；父包的责任人、状态、版本和确认记录保持不变。创建时 `SELECT ... FOR UPDATE` 锁定父包串行化并发，配合部分唯一索引 `(parent_handoff_id, idempotency_key) WHERE parent_handoff_id IS NOT NULL`，保证并发更新、签收和同一幂等键重试只产生一个补充包、一组差异和一条 `supplementary_handoff_created` 审计事件。前端并排展示父快照与本次差异。
 - **实时收敛**：前端每 2s 拉取行动项/时间线/交接包；冲突后展示服务器当前版本，用户可 rebase 重试，最终多端状态一致。

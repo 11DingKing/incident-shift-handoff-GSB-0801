@@ -1,14 +1,18 @@
-import type { FastifyInstance } from 'fastify';
-import { v4 as uuid } from 'uuid';
-import { query, withTransaction, pool } from './db/pool.js';
-import * as repo from './repo.js';
-import { ConflictError, ImmutableHandoffError, NotFoundError } from './errors.js';
-import type { ActionItemStatus } from './types.js';
+import type { FastifyInstance } from "fastify";
+import { v4 as uuid } from "uuid";
+import { query, withTransaction, pool } from "./db/pool.js";
+import * as repo from "./repo.js";
+import {
+  ConflictError,
+  ImmutableHandoffError,
+  NotFoundError,
+} from "./errors.js";
+import type { ActionItemStatus } from "./types.js";
 
-const ACTOR_HEADER = 'x-actor';
+const ACTOR_HEADER = "x-actor";
 
 function actor(req: any): string {
-  const raw = (req.headers[ACTOR_HEADER] as string) || 'anonymous';
+  const raw = (req.headers[ACTOR_HEADER] as string) || "anonymous";
   try {
     return decodeURIComponent(raw);
   } catch {
@@ -17,41 +21,46 @@ function actor(req: any): string {
 }
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/health', async () => ({ ok: true, time: new Date().toISOString() }));
+  app.get("/health", async () => ({
+    ok: true,
+    time: new Date().toISOString(),
+  }));
 
   // ----- Incidents -----
-  app.get('/api/incidents/:incidentId', async (req, reply) => {
+  app.get("/api/incidents/:incidentId", async (req, reply) => {
     const { incidentId } = req.params as any;
     const inc = await repo.getIncident(pool, incidentId);
     return inc;
   });
 
-  app.get('/api/incidents/:incidentId/action-items', async (req) => {
+  app.get("/api/incidents/:incidentId/action-items", async (req) => {
     const { incidentId } = req.params as any;
     return repo.listActionItems(pool, incidentId);
   });
 
-  app.get('/api/incidents/:incidentId/timeline', async (req) => {
+  app.get("/api/incidents/:incidentId/timeline", async (req) => {
     const { incidentId } = req.params as any;
     return repo.listTimeline(pool, incidentId);
   });
 
-  app.get('/api/incidents/:incidentId/handoffs', async (req) => {
+  app.get("/api/incidents/:incidentId/handoffs", async (req) => {
     const { incidentId } = req.params as any;
     return repo.listHandoffs(pool, incidentId);
   });
 
-  app.get('/api/incidents/:incidentId/audit', async (req) => {
+  app.get("/api/incidents/:incidentId/audit", async (req) => {
     const { incidentId } = req.params as any;
     return repo.listAudit(pool, incidentId);
   });
 
   // ----- Action items (optimistic locking) -----
-  app.patch('/api/action-items/:actionItemId', async (req, reply) => {
+  app.patch("/api/action-items/:actionItemId", async (req, reply) => {
     const { actionItemId } = req.params as any;
     const body = req.body as any;
-    if (typeof body.expected_version !== 'number') {
-      return reply.status(400).send({ error: 'expected_version (number) is required' });
+    if (typeof body.expected_version !== "number") {
+      return reply
+        .status(400)
+        .send({ error: "expected_version (number) is required" });
     }
     const result = await withTransaction((client) =>
       repo.updateActionItem(client, actionItemId, {
@@ -67,14 +76,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return result;
   });
 
-  app.post('/api/incidents/:incidentId/action-items', async (req) => {
+  app.post("/api/incidents/:incidentId/action-items", async (req) => {
     const { incidentId } = req.params as any;
     const body = req.body as any;
     return withTransaction((client) =>
       repo.addActionItem(client, incidentId, {
+        action_item_id: body.action_item_id,
         title: body.title,
-        description: body.description ?? '',
-        status: (body.status ?? 'open') as ActionItemStatus,
+        description: body.description ?? "",
+        status: (body.status ?? "open") as ActionItemStatus,
         owner: body.owner,
         due_at: body.due_at ?? null,
         occurred_at: body.occurred_at ?? new Date().toISOString(),
@@ -83,11 +93,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ----- Timeline (append-only) -----
-  app.post('/api/incidents/:incidentId/timeline', async (req) => {
+  app.post("/api/incidents/:incidentId/timeline", async (req) => {
     const { incidentId } = req.params as any;
     const body = req.body as any;
     return withTransaction((client) =>
       repo.addTimelineEvent(client, incidentId, {
+        event_id: body.event_id,
         event_type: body.event_type,
         summary: body.summary,
         actor: body.actor ?? actor(req),
@@ -97,7 +108,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ----- Handoffs -----
-  app.post('/api/incidents/:incidentId/handoffs', async (req) => {
+  app.post("/api/incidents/:incidentId/handoffs", async (req) => {
     const { incidentId } = req.params as any;
     const body = req.body as any;
     const handoffId = body.handoff_id ?? `hnd-${uuid()}`;
@@ -107,23 +118,60 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         incident_id: incidentId,
         from_shift: body.from_shift,
         to_shift: body.to_shift,
-        summary: body.summary ?? '',
+        summary: body.summary ?? "",
         created_by: body.created_by ?? actor(req),
       }),
     );
   });
 
-  app.get('/api/handoffs/:handoffId', async (req) => {
+  // Create a supplementary (child) handoff package linked to a parent.
+  // It snapshots ONLY new/changed items & timeline events since the parent's
+  // snapshot and records per-field diffs. Idempotent via idempotency_key.
+  app.post(
+    "/api/incidents/:incidentId/handoffs/supplementary",
+    async (req, reply) => {
+      const { incidentId } = req.params as any;
+      const body = req.body as any;
+      if (!body.parent_handoff_id) {
+        return reply
+          .status(400)
+          .send({ error: "parent_handoff_id is required" });
+      }
+      if (!body.from_shift || !body.to_shift) {
+        return reply
+          .status(400)
+          .send({ error: "from_shift and to_shift are required" });
+      }
+      const handoffId = body.handoff_id ?? `sup-${uuid()}`;
+      const idempotencyKey =
+        body.idempotency_key ??
+        `${actor(req)}:${body.parent_handoff_id}:supplementary`;
+      return withTransaction((client) =>
+        repo.createSupplementaryHandoff(client, {
+          handoff_id: handoffId,
+          parent_handoff_id: body.parent_handoff_id,
+          incident_id: incidentId,
+          from_shift: body.from_shift,
+          to_shift: body.to_shift,
+          summary: body.summary ?? "",
+          created_by: body.created_by ?? actor(req),
+          idempotency_key: idempotencyKey,
+        }),
+      );
+    },
+  );
+
+  app.get("/api/handoffs/:handoffId", async (req) => {
     const { handoffId } = req.params as any;
     return repo.getHandoff(pool, handoffId);
   });
 
   // ----- Acknowledgments (idempotent, atomic status flip) -----
-  app.post('/api/handoffs/:handoffId/acknowledge', async (req) => {
+  app.post("/api/handoffs/:handoffId/acknowledge", async (req) => {
     const { handoffId } = req.params as any;
     const body = req.body as any;
     if (!body.confirmed_by) {
-      return { status: 400, error: 'confirmed_by is required' };
+      return { status: 400, error: "confirmed_by is required" };
     }
     const idempotencyKey = body.idempotency_key ?? uuid();
     const result = await withTransaction((client) =>
@@ -139,22 +187,25 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Convenience: per-item acknowledge
-  app.post('/api/handoffs/:handoffId/items/:actionItemId/acknowledge', async (req) => {
-    const { handoffId, actionItemId } = req.params as any;
-    const body = req.body as any;
-    if (!body.confirmed_by) {
-      return { status: 400, error: 'confirmed_by is required' };
-    }
-    const idempotencyKey = body.idempotency_key ?? uuid();
-    const result = await withTransaction((client) =>
-      repo.acknowledge(client, {
-        handoff_id: handoffId,
-        action_item_id: actionItemId,
-        confirmed_by: body.confirmed_by,
-        note: body.note,
-        idempotency_key: idempotencyKey,
-      }),
-    );
-    return { ...result, idempotency_key: idempotencyKey };
-  });
+  app.post(
+    "/api/handoffs/:handoffId/items/:actionItemId/acknowledge",
+    async (req) => {
+      const { handoffId, actionItemId } = req.params as any;
+      const body = req.body as any;
+      if (!body.confirmed_by) {
+        return { status: 400, error: "confirmed_by is required" };
+      }
+      const idempotencyKey = body.idempotency_key ?? uuid();
+      const result = await withTransaction((client) =>
+        repo.acknowledge(client, {
+          handoff_id: handoffId,
+          action_item_id: actionItemId,
+          confirmed_by: body.confirmed_by,
+          note: body.note,
+          idempotency_key: idempotencyKey,
+        }),
+      );
+      return { ...result, idempotency_key: idempotencyKey };
+    },
+  );
 }

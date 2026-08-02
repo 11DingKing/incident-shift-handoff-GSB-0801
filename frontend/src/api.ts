@@ -91,6 +91,7 @@ export class ApiClient {
   }
 
   addTimelineEvent(incidentId: string, payload: {
+    event_id?: string;
     event_type: string;
     summary: string;
     occurred_at?: string;
@@ -98,6 +99,21 @@ export class ApiClient {
     return this.request(`/api/incidents/${incidentId}/timeline`, {
       method: 'POST',
       body: JSON.stringify({ actor: this.actor, occurred_at: new Date().toISOString(), ...payload }),
+    });
+  }
+
+  createSupplementaryHandoff(incidentId: string, payload: {
+    parent_handoff_id: string;
+    from_shift: string;
+    to_shift: string;
+    summary: string;
+    idempotency_key?: string;
+  }): Promise<HandoffDetail & { created: boolean }> {
+    const idempotency_key =
+      payload.idempotency_key ?? `${this.actor}:${payload.parent_handoff_id}:supplementary`;
+    return this.request(`/api/incidents/${incidentId}/handoffs/supplementary`, {
+      method: 'POST',
+      body: JSON.stringify({ created_by: this.actor, ...payload, idempotency_key }),
     });
   }
 

@@ -132,4 +132,96 @@ test.describe('cross-session concurrency and handoff', () => {
     // (open -> in_progress may not change value; just verify focus is retained)
     await expect(select).toBeFocused();
   });
+
+  test('supplementary handoff: append ev-03 and ai-03, create child package, show side-by-side diffs', async ({ page, request }) => {
+    await setActor(page, '接班人');
+
+    // Create and sign off the parent package.
+    await page.getByRole('button', { name: '生成交接快照' }).click();
+    await page.locator('[data-testid="signoff-btn"]').click();
+    await expect(page.locator('.badge-acknowledged').first()).toBeVisible();
+
+    // Append new timeline event ev-03 and new action item ai-03 via API.
+    await request.post(`http://localhost:3001/api/incidents/${INCIDENT}/timeline`, {
+      headers: { 'Content-Type': 'application/json', 'X-Actor': encodeURIComponent('夜班') },
+      data: {
+        event_id: 'ev-gd-20260729-03',
+        event_type: 'update',
+        summary: '东侧绕行路线重新开放',
+        actor: '夜班-赵六',
+      },
+    });
+    await request.post(`http://localhost:3001/api/incidents/${INCIDENT}/action-items`, {
+      headers: { 'Content-Type': 'application/json', 'X-Actor': encodeURIComponent('夜班') },
+      data: {
+        action_item_id: 'ai-gd-20260729-03',
+        title: '东侧绕行路线重新开放',
+        description: '积水消退，恢复通行',
+        status: 'done',
+        owner: '应急协调组-李工',
+      },
+    });
+    // Change an existing action item so a modified-field diff is produced.
+    const items = await (await request.get(`http://localhost:3001/api/incidents/${INCIDENT}/action-items`)).json();
+    const route = items.find((i: any) => i.action_item_id === AI_ROUTE);
+    await request.patch(`http://localhost:3001/api/action-items/${AI_ROUTE}`, {
+      headers: { 'Content-Type': 'application/json', 'X-Actor': encodeURIComponent('夜班') },
+      data: { status: 'done', expected_version: route.version },
+    });
+
+    // Create the supplementary handoff via the UI.
+    await page.locator('[data-testid="create-supplementary-btn"]').click();
+
+    // A child package should be selected and show the side-by-side diff grid.
+    await expect(page.locator('[data-testid="diff-grid"]')).toBeVisible();
+    // New action item ai-03 appears as an added diff.
+    await expect(page.locator('[data-testid="diff-ai-gd-20260729-03"]')).toContainText('新增');
+    await expect(page.locator('[data-testid="diff-ai-gd-20260729-03"]')).toContainText('东侧绕行路线重新开放');
+    // New timeline event ev-03 appears.
+    await expect(page.locator('[data-testid="diff-ev-gd-20260729-03"]')).toBeVisible();
+    // Existing route item shows status modified in_progress -> done.
+    const routeDiff = page.locator('[data-testid="diff-ai-gd-20260729-route-review"]');
+    await expect(routeDiff).toContainText('in_progress');
+    await expect(routeDiff).toContainText('done');
+  });
+
+  test('concurrent supplementary creation with same idempotency key yields one child package', async ({ page, request }) => {
+    await setActor(page, '接班人');
+    await page.getByRole('button', { name: '生成交接快照' }).click();
+    await page.locator('[data-testid="signoff-btn"]').click();
+    await expect(page.locator('.badge-acknowledged').first()).toBeVisible();
+
+    // Find parent handoff id.
+    const handoffs = await (await request.get(`http://localhost:3001/api/incidents/${INCIDENT}/handoffs`)).json();
+    const parent = handoffs.find((h: any) => h.parent_handoff_id === null);
+    expect(parent).toBeTruthy();
+
+    const payload = {
+      parent_handoff_id: parent.handoff_id,
+      from_shift: 'A',
+      to_shift: 'B',
+      summary: '',
+      idempotency_key: 'concurrent-supp-key',
+    };
+    const url = `http://localhost:3001/api/incidents/${INCIDENT}/handoffs/supplementary`;
+    const [r1, r2] = await Promise.all([
+      request.post(url, { headers: { 'Content-Type': 'application/json' }, data: payload }),
+      request.post(url, { headers: { 'Content-Type': 'application/json' }, data: payload }),
+    ]);
+    expect(r1.ok()).toBeTruthy();
+    expect(r2.ok()).toBeTruthy();
+    const b1 = await r1.json();
+    const b2 = await r2.json();
+    expect(b1.handoff.handoff_id).toBe(b2.handoff.handoff_id);
+    const created = [b1.created, b2.created].filter(Boolean).length;
+    expect(created).toBe(1);
+
+    const all = await (await request.get(`http://localhost:3001/api/incidents/${INCIDENT}/handoffs`)).json();
+    const children = all.filter((h: any) => h.parent_handoff_id === parent.handoff_id);
+    expect(children).toHaveLength(1);
+
+    const audit = await (await request.get(`http://localhost:3001/api/incidents/${INCIDENT}/audit`)).json();
+    const suppAudits = audit.filter((a: any) => a.action === 'supplementary_handoff_created');
+    expect(suppAudits).toHaveLength(1);
+  });
 });
