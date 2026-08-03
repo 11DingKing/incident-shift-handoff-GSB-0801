@@ -117,19 +117,28 @@ export class ApiClient {
     });
   }
 
-  acknowledgeItem(handoffId: string, actionItemId: string, note: string): Promise<unknown> {
+  acknowledgeItem(
+    handoffId: string,
+    actionItemId: string,
+    note: string,
+    expectedVersion?: number,
+  ): Promise<unknown> {
     const idempotency_key = `${this.actor}:${handoffId}:item:${actionItemId}`;
     return this.request(`/api/handoffs/${handoffId}/items/${actionItemId}/acknowledge`, {
       method: 'POST',
-      body: JSON.stringify({ confirmed_by: this.actor, note, idempotency_key }),
+      body: JSON.stringify({ confirmed_by: this.actor, note, idempotency_key, expected_version: expectedVersion }),
     });
   }
 
-  acknowledgePackage(handoffId: string, note: string): Promise<unknown> {
+  acknowledgePackage(
+    handoffId: string,
+    note: string,
+    expectedVersion?: number,
+  ): Promise<unknown> {
     const idempotency_key = `${this.actor}:${handoffId}:package`;
     return this.request(`/api/handoffs/${handoffId}/acknowledge`, {
       method: 'POST',
-      body: JSON.stringify({ confirmed_by: this.actor, note, idempotency_key }),
+      body: JSON.stringify({ confirmed_by: this.actor, note, idempotency_key, expected_version: expectedVersion }),
     });
   }
 }

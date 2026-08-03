@@ -1,5 +1,5 @@
-export type ActionItemStatus = 'open' | 'in_progress' | 'done' | 'blocked';
-export type HandoffStatus = 'pending' | 'acknowledged';
+export type ActionItemStatus = "open" | "in_progress" | "done" | "blocked";
+export type HandoffStatus = "pending" | "acknowledged";
 
 export interface Incident {
   incident_id: string;
@@ -38,7 +38,7 @@ export interface TimelineEvent {
   version: number;
 }
 
-export type HandoffKind = 'primary' | 'supplementary';
+export type HandoffKind = "primary" | "supplementary";
 
 export interface Handoff {
   handoff_id: string;
@@ -61,8 +61,8 @@ export interface HandoffDiff {
   diff_id: string;
   handoff_id: string;
   ref_id: string;
-  ref_type: 'action_item' | 'timeline_event';
-  change_kind: 'added' | 'modified';
+  ref_type: "action_item" | "timeline_event";
+  change_kind: "added" | "modified";
   field: string;
   old_value: string | null;
   new_value: string | null;

@@ -181,9 +181,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         confirmed_by: body.confirmed_by,
         note: body.note,
         idempotency_key: idempotencyKey,
+        expected_version:
+          typeof body.expected_version === "number"
+            ? body.expected_version
+            : undefined,
       }),
     );
-    return { ...result, idempotency_key: idempotencyKey };
+    return {
+      ...result,
+      idempotency_key: idempotencyKey,
+    };
   });
 
   // Convenience: per-item acknowledge
@@ -203,6 +210,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           confirmed_by: body.confirmed_by,
           note: body.note,
           idempotency_key: idempotencyKey,
+          expected_version:
+            typeof body.expected_version === "number"
+              ? body.expected_version
+              : undefined,
         }),
       );
       return { ...result, idempotency_key: idempotencyKey };

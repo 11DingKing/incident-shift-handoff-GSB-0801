@@ -716,78 +716,176 @@ export interface AckInput {
   confirmed_by: string;
   note?: string;
   idempotency_key: string;
+  expected_version?: number;
 }
+
+// Fields whose current values are surfaced in a stale-version conflict so the
+// client can show a field-level "you submitted X, server has Y" view.
+const ACK_CONFLICT_FIELDS: Array<keyof ActionItem> = [
+  "title",
+  "status",
+  "owner",
+];
 
 /**
  * Idempotent per-item (or package-level) acknowledgment.
  * UNIQUE(handoff_id, action_item_id, confirmed_by) makes retries safe.
  * Acknowledging the package flips handoff status to acknowledged atomically.
  * Crucially, unconfirmed action items are NOT auto-closed here.
+ *
+ * For item-level acknowledgments an optional expected_version performs an
+ * optimistic-lock check against the live action_item version: a stale client
+ * receives a 409 with field-level current values rather than silently
+ * confirming against outdated content. A retry that reuses the same
+ * idempotency key is recognized first and always returns the existing
+ * acknowledgment without re-validating the version (so a disconnected retry
+ * never duplicates the row or the audit event).
  */
 export async function acknowledge(
   client: PoolClient,
   input: AckInput,
-): Promise<{ ack: any; packageAcknowledged: boolean }> {
+): Promise<{
+  ack: any;
+  packageAcknowledged: boolean;
+  alreadyExisted: boolean;
+}> {
   const h = await client.query<Handoff>(
     "SELECT * FROM handoffs WHERE handoff_id=$1",
     [input.handoff_id],
   );
   if (h.rowCount === 0) throw new NotFoundError(`handoff ${input.handoff_id}`);
   const handoff = h.rows[0];
-  if (handoff.status === "acknowledged" && input.action_item_id !== null) {
-    // Package already signed off; still allow idempotent duplicate acks but disallow new items.
-  }
 
   try {
-    // Use a savepoint so that a unique_violation on concurrent duplicate does not
-    // abort the entire outer transaction.
     let ackRow: any;
-    await client.query("SAVEPOINT ack_insert");
-    try {
-      const inserted = await client.query(
-        `INSERT INTO handoff_acknowledgments(acknowledgment_id, handoff_id, action_item_id, confirmed_by, note, idempotency_key)
-         VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,
-        [
-          uuid(),
-          input.handoff_id,
-          input.action_item_id,
-          input.confirmed_by,
-          input.note ?? "",
-          input.idempotency_key,
-        ],
-      );
-      ackRow = inserted.rows[0];
-      await client.query("RELEASE SAVEPOINT ack_insert");
-    } catch (e: any) {
-      await client.query("ROLLBACK TO SAVEPOINT ack_insert");
-      if (e.code !== "23505") throw e; // unique_violation
-      const existing =
-        input.action_item_id === null
-          ? await client.query(
-              `SELECT * FROM handoff_acknowledgments
-             WHERE handoff_id=$1 AND confirmed_by=$2 AND action_item_id IS NULL`,
-              [input.handoff_id, input.confirmed_by],
-            )
-          : await client.query(
-              `SELECT * FROM handoff_acknowledgments
-             WHERE handoff_id=$1 AND action_item_id=$2 AND confirmed_by=$3`,
-              [input.handoff_id, input.action_item_id, input.confirmed_by],
-            );
-      ackRow = existing.rows[0];
+    let alreadyExisted = false;
+
+    // Idempotency first: if an acknowledgment with this key already exists,
+    // return it verbatim. This is what makes a disconnected retry safe and
+    // means a stale-version retry that reuses the key of a prior success never
+    // duplicates the row or re-triggers a version conflict.
+    const byKey =
+      input.action_item_id === null
+        ? await client.query(
+            `SELECT * FROM handoff_acknowledgments
+             WHERE handoff_id=$1 AND confirmed_by=$2 AND action_item_id IS NULL
+               AND idempotency_key=$3`,
+            [input.handoff_id, input.confirmed_by, input.idempotency_key],
+          )
+        : await client.query(
+            `SELECT * FROM handoff_acknowledgments
+             WHERE handoff_id=$1 AND action_item_id=$2 AND confirmed_by=$3
+               AND idempotency_key=$4`,
+            [
+              input.handoff_id,
+              input.action_item_id,
+              input.confirmed_by,
+              input.idempotency_key,
+            ],
+          );
+    if (byKey.rowCount && byKey.rowCount > 0) {
+      ackRow = byKey.rows[0];
+      alreadyExisted = true;
     }
 
-    await audit(client, {
-      incident_id: handoff.incident_id,
-      handoff_id: input.handoff_id,
-      action: input.action_item_id
-        ? "item_acknowledged"
-        : "package_acknowledged",
-      actor: input.confirmed_by,
-      payload: {
-        action_item_id: input.action_item_id,
-        idempotency_key: input.idempotency_key,
-      },
-    });
+    // Optimistic-lock check for a NEW item-level acknowledgment. A stale
+    // expected_version produces a 409 with field-level current values rather
+    // than silently confirming against outdated content. Idempotent retries
+    // (alreadyExisted) skip this check.
+    if (
+      !alreadyExisted &&
+      input.action_item_id !== null &&
+      typeof input.expected_version === "number"
+    ) {
+      const live = await client.query<ActionItem>(
+        "SELECT * FROM action_items WHERE action_item_id=$1 FOR UPDATE",
+        [input.action_item_id],
+      );
+      if (live.rowCount === 0)
+        throw new NotFoundError(`action item ${input.action_item_id}`);
+      const row = live.rows[0];
+      if (row.version !== input.expected_version) {
+        const fields: ConflictField[] = ACK_CONFLICT_FIELDS.map((f) => ({
+          field: f,
+          submitted:
+            f === "status"
+              ? `confirm@v${input.expected_version}`
+              : asText(row[f]),
+          current: asText(row[f]),
+          current_version: row.version,
+        }));
+        await audit(client, {
+          incident_id: handoff.incident_id,
+          handoff_id: input.handoff_id,
+          action: "item_acknowledge_conflict",
+          actor: input.confirmed_by,
+          payload: {
+            action_item_id: input.action_item_id,
+            expected_version: input.expected_version,
+            current_version: row.version,
+          },
+        });
+        throw new ConflictError(
+          `Action item ${input.action_item_id} changed since your view (current version ${row.version}, you confirmed against ${input.expected_version})`,
+          fields,
+        );
+      }
+    }
+
+    // Insert the new row. A concurrent duplicate (same user/item, possibly a
+    // different key) hits the unique constraint; we roll back to the savepoint
+    // and return the existing row so exactly one confirmation survives.
+    if (!alreadyExisted) {
+      await client.query("SAVEPOINT ack_insert");
+      try {
+        const inserted = await client.query(
+          `INSERT INTO handoff_acknowledgments(acknowledgment_id, handoff_id, action_item_id, confirmed_by, note, idempotency_key)
+           VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,
+          [
+            uuid(),
+            input.handoff_id,
+            input.action_item_id,
+            input.confirmed_by,
+            input.note ?? "",
+            input.idempotency_key,
+          ],
+        );
+        ackRow = inserted.rows[0];
+        await client.query("RELEASE SAVEPOINT ack_insert");
+      } catch (e: any) {
+        await client.query("ROLLBACK TO SAVEPOINT ack_insert");
+        if (e.code !== "23505") throw e; // unique_violation
+        alreadyExisted = true;
+        const existing =
+          input.action_item_id === null
+            ? await client.query(
+                `SELECT * FROM handoff_acknowledgments
+               WHERE handoff_id=$1 AND confirmed_by=$2 AND action_item_id IS NULL`,
+                [input.handoff_id, input.confirmed_by],
+              )
+            : await client.query(
+                `SELECT * FROM handoff_acknowledgments
+               WHERE handoff_id=$1 AND action_item_id=$2 AND confirmed_by=$3`,
+                [input.handoff_id, input.action_item_id, input.confirmed_by],
+              );
+        ackRow = existing.rows[0];
+      }
+    }
+
+    if (!alreadyExisted) {
+      await audit(client, {
+        incident_id: handoff.incident_id,
+        handoff_id: input.handoff_id,
+        action: input.action_item_id
+          ? "item_acknowledged"
+          : "package_acknowledged",
+        actor: input.confirmed_by,
+        payload: {
+          action_item_id: input.action_item_id,
+          idempotency_key: input.idempotency_key,
+        },
+      });
+    }
 
     // Package-level acknowledgment (action_item_id null) flips the handoff status.
     // The WHERE status='pending' guard makes concurrent duplicate calls safe: only
@@ -801,7 +899,7 @@ export async function acknowledge(
       );
       packageAcknowledged = (flip.rowCount ?? 0) > 0;
     }
-    return { ack: ackRow, packageAcknowledged };
+    return { ack: ackRow, packageAcknowledged, alreadyExisted };
   } catch (err: any) {
     throw err;
   }
